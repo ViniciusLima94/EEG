@@ -23,9 +23,6 @@ class MLP(nn.Module):
     }
 
     def __init__(
-        """
-        Constructor method
-        """
         self,
         in_dim: int,
         layer_sizes: list,
@@ -33,6 +30,9 @@ class MLP(nn.Module):
         activation: str,
         use_bn: bool,
     ):
+        """
+        Constructor method
+        """
         super().__init__()
         Act = self.ACTIVATIONS[activation]
         layers = []

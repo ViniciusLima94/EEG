@@ -1,7 +1,10 @@
-"""src.model package
+"""
+src.model package
 
-Minimal package initializer for model-related code. Add model modules (e.g., model.py or subpackages)
-as needed. This file exists so `import src.model` works and to allow exports from src.__init__.
+Model subpackage for model-related code. Expose model helpers here for convenient imports
+like `from src.model import MLP` or `from src import MLP`.
 """
 
-__all__ = []
+from .mlp import MLP
+
+__all__ = ["MLP"]

@@ -54,13 +54,13 @@ def remove_artifacts_interpolate(
     return df_clean
 
 
-def extract_features(window: np.ndarray, BANDS: dict) -> np.ndarray:
+def extract_features(window: np.ndarray, fs: float, BANDS: dict) -> np.ndarray:
     """window shape: (n_samples, n_channels) → 1-D feature vector."""
     feats = []
     for ch in range(window.shape[1]):
         sig = window[:, ch]
         for fmin, fmax in BANDS.values():
-            feats.append(band_power(sig, fmin, fmax))
+            feats.append(band_power(sig, fs, fmin, fmax))
         mean = np.mean(sig)
         feats.append(np.std(sig) / mean if mean != 0 else 0.0)
     return np.array(feats, dtype=np.float32)
