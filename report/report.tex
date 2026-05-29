@@ -1,0 +1,715 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{enumitem}
+
+% ── code listing style ──────────────────────────────────────────────────────
+\definecolor{codebg}{HTML}{F6F8FA}
+\definecolor{codecomment}{HTML}{6A737D}
+\definecolor{codestring}{HTML}{032F62}
+\definecolor{codekw}{HTML}{D73A49}
+
+\lstdefinestyle{pycode}{
+  language=Python,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  xleftmargin=1em,
+  xrightmargin=1em,
+  captionpos=b,
+  numbers=none,
+}
+
+\lstdefinestyle{tscode}{
+  language=Java,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  breaklines=true,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  xleftmargin=1em,
+  xrightmargin=1em,
+  captionpos=b,
+  numbers=none,
+}
+
+% ── section spacing ──────────────────────────────────────────────────────────
+\titlespacing*{\section}{0pt}{1.4ex plus .2ex}{0.8ex plus .1ex}
+\titlespacing*{\subsection}{0pt}{1.2ex plus .2ex}{0.6ex plus .1ex}
+\titlespacing*{\subsubsection}{0pt}{1.0ex plus .2ex}{0.4ex plus .1ex}
+
+% ── hyperref setup ───────────────────────────────────────────────────────────
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!70!black,
+  citecolor=green!50!black,
+}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\title{\textbf{EEG Based Trigger Prediction and\\Real Time BCI System}\\[0.5em]
+       \large Technical Report}
+\author{Vinicius Lima}
+\date{May 2026}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Objective}
+% =============================================================================
+
+This project aims to build a real time Brain Computer Interface (BCI)
+system that predicts, from multi channel EEG signals alone, whether a
+subject is \emph{about to press a physical trigger button}. The ultimate
+application is motor intention decoding: the classifier must issue a
+prediction at the \emph{next} sample given only a finite causal look back
+window of raw EEG, so that the output can drive downstream actions without
+any future data leakage.
+
+As a controlled development and validation step, the pipeline is trained
+and evaluated on an eye open/closed detection task - a well characterised
+paradigm that generates reliable, high SNR EEG correlates and provides a
+ground truth label at every sample. Demonstrating high accuracy on this
+proxy task validates the causal windowing scheme, the feature
+representation, and the online inference architecture before transitioning
+to button press data.
+
+The specific objectives are:
+
+\begin{enumerate}[leftmargin=1.5em]
+  \item Train a causal classifier on a recorded EEG dataset (eye open/closed
+        as test proxy) using a sliding window feature representation that
+        strictly respects temporal causality.
+  \item Tune hyperparameters automatically, including the optimal look back
+        window length~$T$.
+  \item Integrate the trained model into the PiEEG server acquisition
+        pipeline for sample by sample online inference.
+  \item Extend the server hardware layer to capture a physical button
+        signal alongside EEG, providing the ground truth label for
+        trigger press prediction during live sessions.
+  \item Stream the real time prediction probability time series to the web
+        dashboard for monitoring.
+\end{enumerate}
+
+% =============================================================================
+\section{Methods}
+% =============================================================================
+
+\subsection{Dataset}
+
+Recording sessions were collected with a 16 channel PiEEG headset at a
+sampling rate of 250\,Hz \textbf{(128 Hz for the eyes open/closed dataset; I might have used this value to convert window length to time so it could have errors bellow)}. As a proxy task for validating the causal
+prediction pipeline, the \texttt{eyeDetection} binary label is used during
+training: 0~=~eyes closed, 1~=~eyes open. This label serves as a
+convenient stand in for button press prediction because eye open/closed
+transitions produce strong, well understood EEG correlates, making classification
+performance a reliable indicator of whether the causal windowing and
+feature extraction scheme is working correctly.
+
+The dataset used for training (\texttt{session\_test\_2.csv}) contains
+21\,318 samples with a class distribution of 13\,003 closed and 8\,315
+open, yielding a moderate class imbalance of approximately 61\% / 39\%.
+Each CSV file contains 16 EEG channel columns (\texttt{ch1}–\texttt{ch16})
+and a \texttt{timestamp} column.
+
+\subsection{Preprocessing}
+
+Two preprocessing steps are applied before feature extraction.
+
+\subsubsection{Artifact Removal}
+
+Samples exceeding the 0.1st or 99.9th quantile per channel are flagged as
+outliers. A margin of $\pm5$ samples around each flagged point is also
+marked to capture the rising and falling edges of transient artifacts. All
+flagged values are replaced by linear interpolation along the time axis.
+This step replaced 1\,243 sample channel values in the training session.
+
+\subsubsection{Band Pass Filtering}
+
+A zero phase FIR band pass filter (0.1–60\,Hz, Hamming window) is applied
+using MNE's \texttt{filter\_data} to remove DC drift and high frequency
+noise above the Nyquist relevant band.
+
+\subsubsection{Standardisation}
+
+After filtering, each channel is z score normalised to zero mean and unit
+variance using scikit learn's \texttt{StandardScaler}. The fitted scaler is
+serialised to disk for use during online inference.
+
+\subsection{Causal Random Forest Classifier}
+
+\subsubsection{Motivation and Causal Window Design}
+
+The model must operate in a strictly causal setting: at inference time only
+past and present samples are available. The classification task is:
+
+\begin{quote}
+  Given $T$ consecutive EEG samples ending at time $t$, predict the eye
+  state label at time $t + 1$.
+\end{quote}
+
+The input is represented as a flattened feature vector of shape
+$(C \times T,)$, where $C = 16$ is the number of channels and $T$ is the
+window length in samples. Flattening follows row major order:
+
+\[
+  \mathbf{x} =
+  \bigl[
+    x_{0,0},\; x_{0,1},\; \ldots,\; x_{0,T 1},\;
+    x_{1,0},\; \ldots,\;
+    x_{C 1,T 1}
+  \bigr]
+\]
+
+where $x_{c,\ell}$ is the value of channel~$c$ at lag~$\ell$ before the
+target. This ordering gives each
+feature a unique (channel, temporal lag) interpretation, which is later
+exploited for feature importance analysis.
+
+The sliding window builder constructs $N - T$ labelled samples from an
+$N$-sample recording:
+
+\begin{align*}
+  \mathbf{X}_{\mathrm{win}}[i] &= \mathrm{flatten}\!\left(
+      \mathbf{X}_{\mathrm{scaled}}[i:\,i+T]
+    \right) \in \mathbb{R}^{C \times T} \\
+  y_{\mathrm{win}}[i] &= y_{\mathrm{raw}}[i + T]
+\end{align*}
+
+\subsubsection{Model}
+
+A \textbf{Random Forest} ensemble (\texttt{sklearn.ensemble.RandomForestClassifier})
+is used as the classifier. Key motivations:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item Handles high dimensional tabular inputs (up to
+        $C \times T = 2\,000$ features) without architectural design.
+  \item Interpretable via Gini feature importance, enabling inspection of
+        which channels and temporal lags contribute most.
+  \item CPU parallelisable (\texttt{n\_jobs=-1}), making online inference
+        feasible on a Raspberry~Pi without a GPU (\textbf{ca veut dire, letape apres lentreinement du modele}).
+  \item Produces well calibrated class probabilities via
+        \texttt{predict\_proba}, suitable for continuous monitoring.
+\end{itemize}
+
+\subsubsection{Hyperparameter Optimisation}
+
+Hyperparameter search is performed with \textbf{Optuna} (40 trials, TPE
+sampler, MedianPruner). The window length~$T$ is treated as a
+hyperparameter alongside the forest parameters because it directly
+determines the number of input features ($C \times T$) and the temporal
+context available to the model.
+
+The full search space is shown in Table~\ref{tab:search_space}.
+
+\begin{table}[ht]
+\centering
+\caption{Optuna search space for the causal Random Forest.}
+\label{tab:search_space}
+\begin{tabular}{lll}
+  \toprule
+  Hyperparameter       & Range / Choices            & Notes \\
+  \midrule
+  $T$                  & 4 – 128 (log scale)        & 31\,ms – 1\,s look back at 128\,Hz \\
+  \texttt{n\_estimators}    & 50 – 500 (log scale)       & Number of trees \\
+  \texttt{max\_depth}       & None, 5, 10, 20, 30        & None = fully grown \\
+  \texttt{min\_samples\_split} & 2 – 20                  & Min samples to split a node \\
+  \texttt{min\_samples\_leaf}  & 1 – 10                  & Min samples per leaf \\
+  \texttt{max\_features}    & \texttt{sqrt}, \texttt{log2}, 0.1, 0.3 & Features per split \\
+  \texttt{class\_weight}    & \texttt{balanced}, None    & Class imbalance handling \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Inner cross validation} uses 3 fold stratified k fold. After each
+fold, the intermediate AUC is reported to the Optuna pruner; trials falling
+below the median of completed trials after the first fold are pruned
+(MedianPruner, 10 warm up trials). The objective function maximises the
+mean ROC AUC across the three inner folds.
+
+\subsubsection{Best Configuration}
+
+The best trial (trial~\#21 out of 40) achieved an inner CV AUC of
+\textbf{0.9996} with the configuration shown in
+Table~\ref{tab:best_params}.
+
+\begin{table}[ht]
+\centering
+\caption{Best hyperparameter configuration found by Optuna.}
+\label{tab:best_params}
+\begin{tabular}{ll}
+  \toprule
+  Parameter & Value \\
+  \midrule
+  $T$ & 125 samples ($\approx$\,977\,ms look back) \\
+  \texttt{n\_estimators}    & 50 \\
+  \texttt{max\_depth}       & 30 \\
+  \texttt{min\_samples\_split} & 13 \\
+  \texttt{min\_samples\_leaf}  & 3 \\
+  \texttt{max\_features}    & \texttt{sqrt} \\
+  \texttt{class\_weight}    & None \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+With $T = 125$ and $C = 16$, the final feature vector has
+$\mathbf{2\,000}$ dimensions.
+
+\subsubsection{Final Evaluation}
+
+The best configuration is re evaluated with \textbf{5 fold stratified
+cross validation} on the full windowed dataset (21\,193 windows).
+Predictions are stored at their original indices to allow reconstruction of
+the full prediction time series for visualisation.
+Table~\ref{tab:results} summarises the results.
+
+\begin{table}[ht]
+\centering
+\caption{5 fold CV evaluation results.}
+\label{tab:results}
+\begin{tabular}{llll}
+  \toprule
+  Metric & Closed & Open & Overall \\
+  \midrule
+  AUC (mean $\pm$ std) & \multicolumn{3}{c}{$\mathbf{0.9997 \pm 0.0001}$} \\
+  Accuracy             & \multicolumn{3}{c}{\textbf{99.05\%}} \\
+  Precision            & 1.00 & 0.98 & — \\
+  Recall               & 0.99 & 0.99 & — \\
+  F1 score             & 0.99 & 0.99 & 0.99 \\
+  Support              & 12\,878 & 8\,315 & 21\,193 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+Per fold AUC values were: 0.9997, 0.9998, 0.9996, 0.9997, 0.9996 - showing
+negligible variance across folds.
+
+\subsubsection{Feature Importance Analysis}
+
+After evaluation, the classifier is refitted on the full windowed dataset
+and Gini feature importances are extracted. The importance vector of length
+$C \times T$ is reshaped into a $(C, T)$ matrix to visualise the
+\textbf{temporal receptive field} — which channels and which temporal lags
+the forest relies on most.
+
+The three most informative channels (summed over all lags) are shown in
+Table~\ref{tab:importance} (\textbf{dans le test case ca nest pas tres important, mais juste pour illustrer quon peut isoler les canaux plus predictifs}).
+
+\begin{table}[ht]
+\centering
+\caption{Top 3 channels by summed Gini importance.}
+\label{tab:importance}
+\begin{tabular}{cll}
+  \toprule
+  Rank & Channel & Total Gini Importance \\
+  \midrule
+  1 & ch16 & 0.2017 \\
+  2 & ch15 & 0.1745 \\
+  3 & ch13 & 0.1302 \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+Channels 13, 15, and 16 correspond to posterior/occipital electrode
+positions, consistent with the well known dominance of alpha band activity
+(8–13\,Hz) in that region during eye open/closed transitions - the
+expected result given that eye state is used as the proxy training label.
+
+\subsubsection{Model Persistence}
+
+The fitted classifier, scaler, and hyperparameter metadata are serialised to
+three files:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{eeg\_rf\_model.joblib} — the complete trained forest.
+  \item \texttt{eeg\_scaler.joblib} — the fitted \texttt{StandardScaler}.
+  \item \texttt{eeg\_rf\_params.json} — all hyperparameters plus $T$,
+        \texttt{fs}, \texttt{n\_\allowbreak{}channels}, and
+        \texttt{best\_\allowbreak{}cv\_\allowbreak{}auc}.
+\end{itemize}
+
+These files are copied to the \texttt{model/} directory of PiEEG server for
+deployment. So each subject will have a file containing his trained model.
+
+% =============================================================================
+\section{PiEEG Server Modifications}
+% =============================================================================
+
+The following changes were made to the PiEEG server to support online
+inference and ground truth annotation.
+
+\subsection{Button Input (GPIO)}
+
+A physical push button connected to \textbf{GPIO~17} was added as a
+ground truth label source, allowing the user to mark the target class
+synchronously with the EEG stream during live recording.
+
+\subsubsection{\texttt{hardware.py}}
+
+The constant \texttt{BUTTON\_PIN = 17} was defined and the GPIO line is
+claimed during device initialisation:
+
+\begin{lstlisting}[style=pycode, caption={Button GPIO initialisation and read in \texttt{PiEEGHardware}.}]
+BUTTON_PIN = 17
+
+def _init_button(self):
+    """Initialize button input pin (GPIO 17)."""
+    self._button_fd = self._request_line(
+        self._chip_fd, BUTTON_PIN,
+        _GPIOHANDLE_REQUEST_INPUT, consumer=b"button"
+    )
+
+def read_button(self) -> int:
+    """Read the button pin. Returns 1 when pressed, 0 otherwise."""
+    buf = bytearray(_HANDLE_DATA_SIZE)
+    fcntl.ioctl(self._button_fd, _GPIOHANDLE_GET_VALUES, buf)
+    return buf[0]
+\end{lstlisting}
+
+The \texttt{close()} method was updated to release the button file
+descriptor alongside the existing SPI and DRDY lines.
+
+\subsubsection{\texttt{mock.py}}
+
+A \texttt{read\_button()} stub was added to \texttt{MockHardware} so that
+the mock and hardware backends remain interface compatible:
+
+\begin{lstlisting}[style=pycode, caption={Button stub in \texttt{MockHardware}.}]
+def read_button(self) -> int:
+    return 0
+\end{lstlisting}
+
+\subsubsection{\texttt{acquisition.py}}
+
+Both the hardware and mock acquisition loops were updated to call
+\texttt{read\_button()} on every sample and include the result in each
+broadcasted frame as a \texttt{"button"} field:
+
+\begin{lstlisting}[style=pycode, caption={Button field added to every acquisition frame.}]
+button = self._hw.read_button()
+frame = {
+    "t":        round(timestamp, 6),
+    "n":        self._sample_count,
+    "channels": sample,
+    "button":   button,
+}
+self._loop.call_soon_threadsafe(self._enqueue, frame)
+\end{lstlisting}
+
+This extends the WebSocket frame protocol: every data frame now carries a
+\texttt{"button"} integer field (0 or 1) alongside the \texttt{"channels"}
+array. The value is also forwarded to the classifier to be stored as the
+ground truth label for each prediction.
+
+\subsection{Real Time Classifier Module}
+
+A new \texttt{pieeg\_server/classifier.py} module implements
+sample by sample online inference using the trained Random Forest model.
+
+The \texttt{Classifier} class:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item Subscribes to the \texttt{AcquisitionLoop} queue.
+  \item Loads \texttt{eeg\_rf\_model.joblib}, \texttt{eeg\_scaler.joblib},
+        and \texttt{eeg\_rf\_params.json} from the \texttt{model/} directory
+        (configurable via \texttt{PIEEG\_MODEL\_DIR}).
+  \item Maintains a rolling \texttt{deque} buffer of exactly $T$ raw channel
+        frames.
+  \item Once the buffer is full, stacks the $T$ frames into a
+        $(T, C)$ array, applies the persisted scaler, flattens to
+        $(1, C \times T)$, and calls \texttt{predict\_proba} to obtain
+        $P(\text{eyes open})$ for the next sample.
+  \item RF inference runs in a thread pool executor to avoid blocking the
+        main asyncio event loop.
+  \item Each prediction is appended to \texttt{self.probs} as
+        \texttt{\{"prob": float, "true": button\}} and forwarded to a
+        registered \texttt{\_on\_predict} async callback.
+\end{itemize}
+
+\begin{lstlisting}[style=pycode, caption={Core inference loop and prediction method in \texttt{Classifier}.}]
+async def run(self):
+    while True:
+        frame = await self._queue.get()
+        self._buffer.append(frame["channels"])
+        if len(self._buffer) < self._T:
+            continue
+        prob = await asyncio.get_event_loop().run_in_executor(
+            None, self._predict_from_buffer
+        )
+        self.probs.append({"prob": prob, "true": frame["button"]})
+        if self._on_predict is not None:
+            await self._on_predict(prob)
+
+def _predict_from_buffer(self) -> float:
+    X_raw    = np.stack(self._buffer, axis=0).astype(np.float32)
+    X_scaled = self._scaler.transform(X_raw)        # (T, C)
+    X_win    = X_scaled.flatten()[np.newaxis, :]    # (1, C*T)
+    return float(self._clf.predict_proba(X_win)[0, 1])
+\end{lstlisting}
+
+\subsection{Prediction Broadcasting in the WebSocket Server}
+
+\texttt{pieeg\_server/server.py} was extended to wire the classifier to the
+live WebSocket broadcast loop.
+
+\textbf{\texttt{enable\_predictor(classifier)}} registers the classifier
+and installs the callback:
+
+\begin{lstlisting}[style=pycode, caption={Registering the classifier with the WebSocket server.}]
+def enable_predictor(self, classifier) -> None:
+    self._classifier = classifier
+    classifier._on_predict = self._on_prediction
+\end{lstlisting}
+
+\textbf{\texttt{\_on\_prediction(prob)}} is called after each inference.
+It maintains a rolling history of the last 500 probabilities and broadcasts
+a \texttt{"predict"} JSON message to all connected clients:
+
+\begin{lstlisting}[style=pycode, caption={Prediction callback: history update and broadcast.}]
+async def _on_prediction(self, prob: float) -> None:
+    self._predict_history.append(round(prob, 4))
+    if len(self._predict_history) > self._predict_history_maxlen:
+        self._predict_history.pop(0)
+
+    payload = json.dumps({
+        "predict": {
+            "prob":  round(prob, 4),
+            "label": int(prob >= 0.5),
+            "t":     time.time(),
+        }
+    })
+    for ws in list(self._clients):
+        try:
+            await ws.send(payload)
+        except websockets.ConnectionClosed:
+            self._clients.discard(ws)
+\end{lstlisting}
+
+The \textbf{welcome message} sent to newly connected clients was extended
+with \texttt{"predict\_\allowbreak{}enabled"} and
+\texttt{"predict\_\allowbreak{}history"} fields, so
+that a client connecting mid session immediately receives the last 250
+probability values and can render the time series without waiting for new
+predictions.
+
+\subsection{Probability Time Series in the Dashboard}
+
+The React/TypeScript dashboard was updated to display the classifier output
+as a real time probability time series.
+
+\subsubsection{\texttt{useEEG.ts} — ring buffer}
+
+A circular \texttt{Float32Array} buffer is maintained for incoming
+prediction messages:
+
+\begin{lstlisting}[style=tscode, caption={Ring buffer for probability samples in \texttt{useEEG.ts}.}]
+const predictBufRef   = useRef(new Float32Array(PRED_BUFFER_SIZE));
+const predictWriteRef = useRef(0);
+const predictCountRef = useRef(0);
+
+if ("predict" in msg) {
+    const p = (msg as any).predict;
+    const prob = typeof p === "number" ? p : p?.prob ?? null;
+    if (prob !== null) {
+        const buf = predictBufRef.current;
+        buf[predictWriteRef.current] = prob;
+        predictWriteRef.current =
+            (predictWriteRef.current + 1) % PRED_BUFFER_SIZE;
+        if (predictCountRef.current < PRED_BUFFER_SIZE)
+            predictCountRef.current++;
+    }
+}
+\end{lstlisting}
+
+Historical values received in the welcome message are pre loaded into the
+same ring buffer on connect.
+
+\subsubsection{\texttt{\_probabilityPlot.tsx} — canvas renderer}
+
+The function \texttt{drawProbabilityPlot} reads the most recent
+\texttt{plotW} samples in chronological order and draws:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item Y axis ticks at 0.0, 0.5, and 1.0.
+  \item A blue line trace (\texttt{\#58a6ff}) of $P(\text{eyes open})$
+        over time.
+  \item A filled circle at the current (rightmost) probability value.
+  \item A numeric label showing the latest probability to three decimal
+        places.
+\end{itemize}
+
+\subsubsection{\texttt{Spectrogram.tsx} — display mode}
+
+The existing \texttt{Spectrogram} component was extended with a
+\texttt{displayMode} prop (\texttt{"auto"} $|$ \texttt{"prob"} $|$
+\texttt{"spec"}). When the mode is \texttt{"prob"} (or \texttt{"auto"}
+with live predictions available), the probability renderer replaces the
+spectrogram:
+
+\begin{lstlisting}[style=tscode, caption={Display mode switch in \texttt{Spectrogram.tsx}.}]
+const wantProb =
+    displayMode === "prob" ||
+    (displayMode === "auto" && hasPredict &&
+     eegData.predictCount!.current > 1);
+if (wantProb)
+    drawProbabilityPlot(ctx, w, h, eegData);
+\end{lstlisting}
+
+\subsubsection{\texttt{App.tsx} — Prediction toggle button}
+
+A \textbf{Prediction} toggle button was added to the sidebar's
+\emph{Analysis} section. Clicking it forces the spectrogram panel open and
+passes \texttt{displayMode="prob"} to it:
+
+\begin{lstlisting}[style=tscode, caption={Prediction toggle in the sidebar (\texttt{App.tsx}).}]
+<button
+    className={`btn${showProbability ? " active" : ""}`}
+    onClick={() => {
+        setShowSpectrogram(true);
+        setShowProbability((v) => !v);
+    }}
+    title="Toggle prediction time series in analysis panel"
+>
+    Prediction
+</button>
+\end{lstlisting}
+
+% =============================================================================
+\section{Experimental Results - Eye Open/Closed Test Case}
+% =============================================================================
+
+This section presents the results of applying the causal Random Forest
+pipeline to the eye open/closed dataset, which serves as the validation
+proxy for the button press prediction task. All figures were generated
+directly from the \texttt{eeg\_causal\_rf.ipynb} notebook.
+
+% ── Optuna search ────────────────────────────────────────────────────────────
+\subsection{Hyperparameter Search}
+
+Figure~\ref{fig:optuna} shows the outcome of the 40 trial Optuna search.
+The left panel plots each completed trial as a function of the look back
+window $T$ (in milliseconds) against the inner 3 fold CV AUC. Performance
+is already high across a wide range of $T$ values, but saturates and
+becomes most consistent for $T \gtrsim 600$\,ms, with the optimal
+$T = 125$ samples ($\approx$\,977\,ms) marked by the dashed red line. The
+right panel shows the optimisation history: the best so far curve (gold)
+converges rapidly and stabilises after roughly 25 trials.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{plot_optuna.png}
+  \caption{Optuna hyperparameter search results. \textit{Left:} look back
+    duration $T$ vs.\ inner CV AUC for each completed trial; the dashed
+    line marks the selected $T = 125$ samples (977\,ms).
+    \textit{Right:} optimisation history showing per trial AUC and the
+    best so far curve.}
+  \label{fig:optuna}
+\end{figure}
+
+% ── Confusion matrix ─────────────────────────────────────────────────────────
+\subsection{Classification Performance}
+
+Figure~\ref{fig:cm} shows the confusion matrix obtained from 5 fold
+stratified cross validation (21\,193 windows). The classifier achieves
+near perfect separation: only $\sim$200 windows are misclassified out of
+more than 21\,000. The slight asymmetry between the two error cells
+(more open predicted as closed than the reverse) is consistent with the
+61\%/39\% class imbalance.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.48\textwidth]{plot_confusion_matrix.png}
+  \caption{Confusion matrix from 5 fold CV ($N = 21\,193$ windows,
+    $T = 125$ samples). Overall accuracy: 99.05\%.}
+  \label{fig:cm}
+\end{figure}
+
+% ── Feature importance heatmap ───────────────────────────────────────────────
+\subsection{Feature Importance}
+
+Figure~\ref{fig:heatmap} shows the Gini importance reshaped into a
+$16 \times 125$ heatmap (channel $\times$ temporal lag). The brightest
+cells are concentrated in the posterior channels (ch13–ch16) and at
+short lags (recent samples), indicating that the forest primarily relies
+on recent occipital activity to make its predictions. This is consistent
+with the well known alpha band desynchronisation signature of eye
+opening in posterior regions.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{plot_importance_heatmap.png}
+  \caption{Feature importance heatmap. Rows are EEG channels; columns are
+    temporal lags (0 = most recent sample). Colour encodes Gini importance
+    — brighter regions are more discriminative. The highlighted cell marks
+    the single most important (channel, lag) pair.}
+  \label{fig:heatmap}
+\end{figure}
+
+Figure~\ref{fig:ch_importance} shows the total importance summed across
+all lags for each channel. Channels ch16, ch15, and ch13 account for more
+than 50\% of the total importance, while frontal channels (ch1–ch4)
+contribute comparatively little.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.85\textwidth]{plot_channel_importance.png}
+  \caption{Per channel importance (sum of Gini importance over all
+    $T = 125$ lags). The most important channel (ch16) is highlighted
+    in gold.}
+  \label{fig:ch_importance}
+\end{figure}
+
+% ── Prediction time series ───────────────────────────────────────────────────
+\subsection{Prediction Time Series}
+
+Figure~\ref{fig:timeseries} shows a 1\,500 sample excerpt of the
+prediction output alongside the 16 raw EEG channels. The two bar rows at
+the top encode the true label (white) and the predicted label (coral), with
+gold segments marking misclassifications. The EEG signal rows use a light
+green background tint where eyes are truly open. The classifier tracks the
+true label with high fidelity across the excerpt, and misclassifications
+are sparse and brief - typically occurring at the onset or offset of an
+eye state transition.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=\textwidth]{plot_signals_with_bars.png}
+  \caption{1\,500 sample excerpt of the causal RF predictions overlaid on
+    all 16 EEG channels. \textit{Top two rows:} true label (white bar) and
+    predicted label (coral bar); gold segments indicate misclassifications.
+    \textit{Lower rows:} z scored EEG channels with light green background
+    where eyes are truly open.}
+  \label{fig:timeseries}
+\end{figure}
+
+% 
+
+\end{document}

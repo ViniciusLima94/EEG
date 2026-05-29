@@ -1,10 +1,13 @@
 """
-src.model package
+src.model package — PyTorch model definitions.
 
-Model subpackage for model-related code. Expose model helpers here for convenient imports
-like `from src.model import MLP` or `from src import MLP`.
+Convenient imports:
+    from src.model import MLP
+    from src.model import CausalConv1D, make_model
+    from src import MLP, CausalConv1D, make_model
 """
 
 from .mlp import MLP
+from .conv1d import CausalConv1D, make_model
 
-__all__ = ["MLP"]
+__all__ = ["MLP", "CausalConv1D", "make_model"]
