@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from .spectral import band_power
@@ -52,6 +54,83 @@ def remove_artifacts_interpolate(
         )
 
     return df_clean
+
+
+def event_detection_metrics(
+    probs: np.ndarray,
+    y_momentary: np.ndarray,
+    threshold: float,
+    horizon: int,
+    fs_eff: float,
+) -> dict:
+    """
+    Event-level detection metrics for button-press prediction.
+
+    Instead of sample-level AUC, evaluates whether each discrete press *event*
+    was predicted at least once within the `horizon` samples before its onset.
+    This matches the real BCI use-case: "did the system fire before the press?"
+
+    Parameters
+    ----------
+    probs        : (N,) per-sample predicted probabilities
+    y_momentary  : (N,) original momentary press labels (0/1) — NOT horizon-expanded
+    threshold    : decision threshold
+    horizon      : anticipatory window in samples (same as HORIZON used for labelling)
+    fs_eff       : effective sampling rate (Hz) — used for latency and FA rate
+
+    Returns
+    -------
+    dict with:
+        event_sensitivity  — fraction of press events with at least one true detection
+        fa_per_minute      — false alarm events per minute of recording time
+        mean_latency_ms    — mean detection advance (ms before press onset), detected events only
+        n_events           — total press events in recording
+        n_detected         — events detected (true positives)
+        n_false_alarms     — false alarm events (runs of preds=1 outside any event window)
+    """
+    N = len(probs)
+    preds = (probs >= threshold).astype(np.int8)
+
+    # 1. Find press event onsets (first sample of each contiguous run of 1s)
+    y = y_momentary.astype(np.int8)
+    onsets = list(np.where((y[1:] == 1) & (y[:-1] == 0))[0] + 1)
+    if y[0] == 1:
+        onsets = [0] + onsets
+
+    # 2. Mark every sample inside a pre-press window as "protected"
+    #    (true-positive zone; predictions here are NOT false alarms)
+    protected = np.zeros(N, dtype=bool)
+    for onset in onsets:
+        protected[max(0, onset - horizon) : onset + 1] = True
+
+    # 3. Event sensitivity + mean detection latency
+    n_detected = 0
+    latencies_ms: list[float] = []
+    for onset in onsets:
+        win_start = max(0, onset - horizon)
+        win_probs = probs[win_start:onset]
+        if len(win_probs) > 0 and win_probs.max() >= threshold:
+            n_detected += 1
+            first_det = win_start + int(np.argmax(win_probs >= threshold))
+            latencies_ms.append((onset - first_det) / fs_eff * 1000.0)
+
+    # 4. False alarms: runs of preds=1 entirely outside protected windows
+    fa_signal = preds & (~protected).astype(np.int8)
+    n_fa = int(np.sum((fa_signal[1:] == 1) & (fa_signal[:-1] == 0)))
+    if fa_signal[0] == 1:
+        n_fa += 1
+
+    non_event_seconds = float((~protected).sum()) / fs_eff
+    fa_per_min = n_fa / max(non_event_seconds / 60.0, 1e-9)
+
+    return {
+        "event_sensitivity": n_detected / max(len(onsets), 1),
+        "fa_per_minute": fa_per_min,
+        "mean_latency_ms": float(np.mean(latencies_ms)) if latencies_ms else 0.0,
+        "n_events": len(onsets),
+        "n_detected": n_detected,
+        "n_false_alarms": n_fa,
+    }
 
 
 def extract_features(window: np.ndarray, fs: float, BANDS: dict) -> np.ndarray:
