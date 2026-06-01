@@ -6,6 +6,7 @@ Usage
 from src.preprocessing import load_trial, build_windows, make_horizon_labels
 from src.preprocessing import make_soft_horizon_labels, compute_hjorth
 from src.preprocessing import window_band_power, make_mrcp_template, matched_filter_score
+from src.preprocessing import euclidean_align
 """
 
 from __future__ import annotations
@@ -264,6 +265,35 @@ def matched_filter_score(
     w_norm = (window   - window.mean(axis=0))   / (window.std(axis=0)   + 1e-8)
     t_norm = (template - template.mean(axis=0)) / (template.std(axis=0) + 1e-8)
     return (w_norm * t_norm).mean(axis=0).astype(np.float32)
+
+
+def euclidean_align(X3d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Euclidean Alignment (EA) — per-trial spatial whitening.
+
+    Computes a whitening matrix W from the mean spatial covariance of the
+    input windows, then applies it so the aligned set has identity mean
+    covariance. Use once per trial (or per subject), computed from training
+    windows only, then apply the same W to test windows.
+
+    Parameters
+    ----------
+    X3d : (N, T, C) array of EEG windows
+
+    Returns
+    -------
+    X_aligned : (N, T, C) whitened windows
+    W         : (C, C) whitening matrix  —  store and reuse on held-out data
+                via  X_test_aligned = X_test @ W.T
+    """
+    from scipy.linalg import sqrtm, inv
+
+    T = X3d.shape[1]
+    X64 = X3d.astype(np.float64)
+    covs = np.einsum('ntc,ntd->ncd', X64, X64) / T   # (N, C, C)
+    R_mean = covs.mean(axis=0)                         # (C, C)
+    W = inv(sqrtm(R_mean)).real                        # (C, C)
+    return (X3d @ W.T).astype(np.float32), W
 
 
 def build_windows(
