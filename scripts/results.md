@@ -586,4 +586,56 @@ This re-centres each subject's covariance distribution to the identity, removing
 
 ---
 
-*Last updated: 2026-06-01. Euclidean Alignment experiment complete (Section 16).*
+---
+
+## 17. Code Improvements & Tooling
+
+### 17a. Per-trial Euclidean Alignment in `eeg_svm_multitrial.ipynb`
+
+EA was added to the per-subject multitrial notebook as a `USE_EA = True` flag (Cell 4). When enabled, each trial's windows are whitened to identity covariance **before** the LOTO split, using only that trial's own windows — no cross-trial leakage. The whitening matrix is discarded after use; the aligned `_X_max` array feeds `get_windows_for_T` unchanged. This tests whether intra-subject trial-to-trial covariance drift hurts the SVM (as opposed to inter-subject drift tested in Section 16).
+
+### 17b. Subsampling fix — natural class ratio
+
+**Problem:** `subsample_balanced` forced 50/50 class split before feeding the SVM, then `class_weight='balanced'` in the SVC up-weighted the minority class — a redundant double-correction. After 50/50 subsampling both classes are equal, so `class_weight='balanced'` becomes a no-op (both weights = 1.0).
+
+**Fix:** `subsample_balanced` now draws K windows uniformly at random (natural class ratio preserved). `class_weight='balanced'` now actually does its job — scaling the penalty for minority-class errors by `n / (2 × n_minority)`.
+
+**Why natural ratio is better:** The SVM sees a realistic distribution of resting EEG (majority class), giving a better-characterised negative boundary. The threshold calibrated at `MIN_SPECIFICITY=0.80` is more faithful to the real prior, improving FA/min and EvtSens calibration.
+
+*Affects:* `eeg_svm_multitrial.ipynb` (Cell 8), `scripts/svm_pooled.py`, `scripts/svm_pooled_ea.py`.
+
+### 17c. Per-trial z-score in `load_trial`
+
+Added `trial_zscore: bool = False` parameter to `src/preprocessing.py → load_trial`. When enabled, each EEG channel is z-scored over the full trial duration after CAR: `(x − mean(x)) / std(x)`. Applied per channel (axis=0), preserving relative inter-channel differences within a trial while removing session-level amplitude and offset drift.
+
+**Order of operations:** filter → CAR → z-score → decimate.
+
+**Motivation:** UMAP embeddings (Section 17d) showed that trial 3 of Subject 9 is spatially isolated from all other trials, suggesting a systematic amplitude/offset shift in that session. Per-trial z-score is a lightweight fix that may re-align the trial distributions before windowing, complementary to EA (which addresses covariance rather than mean/variance).
+
+Usage:
+```python
+df, cols = load_trial(subj, tache, trial, path,
+                      lp=LP, hp=HP, decimate=DECIM,
+                      car=True, trial_zscore=True)
+```
+
+### 17d. UMAP embedding notebook (`eeg_umap.ipynb`)
+
+New notebook visualising 2D UMAP projections of the flattened feature vectors (T=1000 ms window, 16 channels, z-scored) for Subject 9. Four conditions compared in a 2×2 grid:
+
+| Panel | CAR | EA |
+|---|---|---|
+| No CAR · No EA | ✗ | ✗ |
+| CAR · No EA | ✓ | ✗ |
+| No CAR · EA | ✗ | ✓ |
+| CAR + EA | ✓ | ✓ |
+
+Dots coloured by horizon label (red = press imminent, blue = rest). A second plot colours by trial index to reveal trial-level clustering.
+
+**Key finding — Subject 9:** Trial 3 forms a clearly isolated cluster in all conditions, separated from trials 0–2, 4–9. This confirms a session-level distribution shift in trial 3 (likely electrode drift or impedance change). When trial 3 is the LOTO test fold, the model generalises to a distribution it has never seen — explaining the worst-performing fold. Recommended follow-up: re-run LOTO excluding trial 3 and compare mean AUC; apply `trial_zscore=True` and check whether trial 3 rejoins the main cluster.
+
+*Output plots:* `report/umap_subject9.png`, `report/umap_subject9_trials.png`
+
+---
+
+*Last updated: 2026-06-01. Sections 17a–d: per-trial EA, subsampling fix, trial z-score, UMAP analysis.*

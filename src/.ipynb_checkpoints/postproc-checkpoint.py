@@ -62,7 +62,6 @@ def event_detection_metrics(
     threshold: float,
     horizon: int,
     fs_eff: float,
-    refractory: int = 0,
 ) -> dict:
     """
     Event-level detection metrics for button-press prediction.
@@ -78,10 +77,6 @@ def event_detection_metrics(
     threshold    : decision threshold
     horizon      : anticipatory window in samples (same as HORIZON used for labelling)
     fs_eff       : effective sampling rate (Hz) — used for latency and FA rate
-    refractory   : minimum gap between consecutive detection events (samples).
-                   After any detection fires (TP or FA), the next `refractory`
-                   samples cannot start a new detection event.  Default 0 = disabled.
-                   Typical value: int(0.5 * fs_eff) — 500 ms.
 
     Returns
     -------
@@ -108,11 +103,8 @@ def event_detection_metrics(
     for onset in onsets:
         protected[max(0, onset - horizon) : onset + 1] = True
 
-    # 3. Event sensitivity + mean detection latency (original logic, unaffected by refractory).
-    #    A press event is detected if the max probability in its horizon window exceeds
-    #    threshold — regardless of whether a clean rising edge occurs inside that window.
+    # 3. Event sensitivity + mean detection latency
     n_detected = 0
-    tp_fire_samples: list[int] = []    # sample at which each TP fired (for refractory)
     latencies_ms: list[float] = []
     for onset in onsets:
         win_start = max(0, onset - horizon)
@@ -120,33 +112,13 @@ def event_detection_metrics(
         if len(win_probs) > 0 and win_probs.max() >= threshold:
             n_detected += 1
             first_det = win_start + int(np.argmax(win_probs >= threshold))
-            tp_fire_samples.append(first_det)
             latencies_ms.append((onset - first_det) / fs_eff * 1000.0)
 
-    # 4. False alarms: rising edges in preds that are entirely outside protected windows.
-    fa_raw: list[int] = list(np.where((preds[1:] == 1) & (preds[:-1] == 0))[0] + 1)
-    if preds[0] == 1:
-        fa_raw = [0] + fa_raw
-    fa_candidates = [ds for ds in fa_raw if not protected[ds]]
-
-    # 5. Apply refractory to FA candidates: suppress any FA that starts within
-    #    `refractory` samples of the previous kept event (TP or FA).
-    if refractory > 0:
-        # Build unified timeline of all fired events (TPs + FA candidates), sorted
-        events_timeline = sorted(
-            [(s, "tp") for s in tp_fire_samples] +
-            [(s, "fa") for s in fa_candidates]
-        )
-        last_fire = -refractory - 1
-        surviving_fa = 0
-        for sample, kind in events_timeline:
-            if sample - last_fire >= refractory:
-                last_fire = sample
-                if kind == "fa":
-                    surviving_fa += 1
-        n_fa = surviving_fa
-    else:
-        n_fa = len(fa_candidates)
+    # 4. False alarms: runs of preds=1 entirely outside protected windows
+    fa_signal = preds & (~protected).astype(np.int8)
+    n_fa = int(np.sum((fa_signal[1:] == 1) & (fa_signal[:-1] == 0)))
+    if fa_signal[0] == 1:
+        n_fa += 1
 
     non_event_seconds = float((~protected).sum()) / fs_eff
     fa_per_min = n_fa / max(non_event_seconds / 60.0, 1e-9)

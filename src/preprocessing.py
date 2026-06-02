@@ -7,6 +7,7 @@ from src.preprocessing import load_trial, build_windows, make_horizon_labels
 from src.preprocessing import make_soft_horizon_labels, compute_hjorth
 from src.preprocessing import window_band_power, make_mrcp_template, matched_filter_score
 from src.preprocessing import euclidean_align
+# load_trial flags: apply_filter, car, trial_zscore, decimate
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ def load_trial(
     apply_filter: bool = True,
     decimate: int = 1,
     car: bool = False,
+    trial_zscore: bool = False,
 ) -> tuple[pd.DataFrame, list]:
     """
     Load one CSV trial, optionally band-pass filter it and/or decimate.
@@ -52,6 +54,10 @@ def load_trial(
     car          : if True, apply Common Average Reference after filtering:
                    subtract the instantaneous mean across all channels from each
                    channel. Reduces volume-conducted common-mode noise.
+    trial_zscore : if True, z-score each channel over the full trial duration
+                   after CAR (mean=0, std=1 per channel). Removes session-level
+                   amplitude differences that cause trial-to-trial distribution
+                   shift — complementary to EA which removes covariance drift.
 
     Returns
     -------
@@ -69,11 +75,15 @@ def load_trial(
         )
     if apply_filter:
         df.iloc[:, 1:-1] = filter_data(
-            df.iloc[:, 1:-1].values.T, fs, lp, hp
+            df.iloc[:, 1:-1].values.T, fs, lp, hp, verbose=False
         ).T
     if car:
         arr = df[cols].values.astype(np.float64)
         arr -= arr.mean(axis=1, keepdims=True)
+        df[cols] = arr
+    if trial_zscore:
+        arr = df[cols].values.astype(np.float64)
+        arr = (arr - arr.mean(axis=0)) / (arr.std(axis=0) + 1e-8)
         df[cols] = arr
     if decimate > 1:
         from scipy.signal import decimate as sp_decimate
@@ -81,6 +91,9 @@ def load_trial(
         n_out = eeg_decimated.shape[0]
         df = df.iloc[::decimate].iloc[:n_out].reset_index(drop=True)
         df[cols] = eeg_decimated
+    # Keep only the rising edge of each button press (011110 → 010000)
+    b = df["button"].values
+    df["button"] = np.diff(b, prepend=0).clip(0).astype(b.dtype)
     return df, cols
 
 

@@ -46,11 +46,8 @@ def available_trials(subj):
 
 def subsample_balanced(X, y, n_total, seed=42):
     rng = np.random.default_rng(seed)
-    n_per = n_total // 2
-    pos = np.where(y == 1)[0]; neg = np.where(y == 0)[0]
-    pi = rng.choice(pos, min(n_per, len(pos)), replace=False)
-    ni = rng.choice(neg, min(n_per, len(neg)), replace=False)
-    idx = np.sort(np.concatenate([pi, ni]))
+    n = min(n_total, len(y))
+    idx = np.sort(rng.choice(len(y), n, replace=False))
     return X[idx], y[idx]
 
 def smooth_scores(scores, window):

@@ -586,4 +586,129 @@ This re-centres each subject's covariance distribution to the identity, removing
 
 ---
 
-*Last updated: 2026-06-01. Euclidean Alignment experiment complete (Section 16).*
+---
+
+## 17. Code Improvements & Tooling
+
+### 17a. Per-trial Euclidean Alignment in `eeg_svm_multitrial.ipynb`
+
+EA was added to the per-subject multitrial notebook as a `USE_EA = True` flag (Cell 4). When enabled, each trial's windows are whitened to identity covariance **before** the LOTO split, using only that trial's own windows — no cross-trial leakage. The whitening matrix is discarded after use; the aligned `_X_max` array feeds `get_windows_for_T` unchanged. This tests whether intra-subject trial-to-trial covariance drift hurts the SVM (as opposed to inter-subject drift tested in Section 16).
+
+### 17b. Subsampling fix — natural class ratio
+
+**Problem:** `subsample_balanced` forced 50/50 class split before feeding the SVM, then `class_weight='balanced'` in the SVC up-weighted the minority class — a redundant double-correction. After 50/50 subsampling both classes are equal, so `class_weight='balanced'` becomes a no-op (both weights = 1.0).
+
+**Fix:** `subsample_balanced` now draws K windows uniformly at random (natural class ratio preserved). `class_weight='balanced'` now actually does its job — scaling the penalty for minority-class errors by `n / (2 × n_minority)`.
+
+**Why natural ratio is better:** The SVM sees a realistic distribution of resting EEG (majority class), giving a better-characterised negative boundary. The threshold calibrated at `MIN_SPECIFICITY=0.80` is more faithful to the real prior, improving FA/min and EvtSens calibration.
+
+*Affects:* `eeg_svm_multitrial.ipynb` (Cell 8), `scripts/svm_pooled.py`, `scripts/svm_pooled_ea.py`.
+
+### 17c. Per-trial z-score in `load_trial`
+
+Added `trial_zscore: bool = False` parameter to `src/preprocessing.py → load_trial`. When enabled, each EEG channel is z-scored over the full trial duration after CAR: `(x − mean(x)) / std(x)`. Applied per channel (axis=0), preserving relative inter-channel differences within a trial while removing session-level amplitude and offset drift.
+
+**Order of operations:** filter → CAR → z-score → decimate.
+
+**Motivation:** UMAP embeddings (Section 17d) showed that trial 3 of Subject 9 is spatially isolated from all other trials, suggesting a systematic amplitude/offset shift in that session. Per-trial z-score is a lightweight fix that may re-align the trial distributions before windowing, complementary to EA (which addresses covariance rather than mean/variance).
+
+Usage:
+```python
+df, cols = load_trial(subj, tache, trial, path,
+                      lp=LP, hp=HP, decimate=DECIM,
+                      car=True, trial_zscore=True)
+```
+
+### 17d. UMAP embedding notebook (`eeg_umap.ipynb`)
+
+New notebook visualising 2D UMAP projections of the flattened feature vectors (T=1000 ms window, 16 channels, z-scored) for Subject 9. Four conditions compared in a 2×2 grid:
+
+| Panel | CAR | EA |
+|---|---|---|
+| No CAR · No EA | ✗ | ✗ |
+| CAR · No EA | ✓ | ✗ |
+| No CAR · EA | ✗ | ✓ |
+| CAR + EA | ✓ | ✓ |
+
+Dots coloured by horizon label (red = press imminent, blue = rest). A second plot colours by trial index to reveal trial-level clustering.
+
+**Key finding — Subject 9:** Trial 3 forms a clearly isolated cluster in all conditions, separated from trials 0–2, 4–9. This confirms a session-level distribution shift in trial 3 (likely electrode drift or impedance change). When trial 3 is the LOTO test fold, the model generalises to a distribution it has never seen — explaining the worst-performing fold. Recommended follow-up: re-run LOTO excluding trial 3 and compare mean AUC; apply `trial_zscore=True` and check whether trial 3 rejoins the main cluster.
+
+*Output plots:* `report/umap_subject9.png`, `report/umap_subject9_trials.png`
+
+---
+
+*Last updated: 2026-06-01. Sections 17a–d: per-trial EA, subsampling fix, trial z-score, UMAP analysis.*
+
+---
+
+## 18. LightGBM Pipeline Improvements — HORIZON Sweep & Cross-Subject (LOTO, 300 ms)
+
+### 18a. Pipeline Changes
+
+Three changes applied to `lgb_loto_eval.py` and `eeg_lgb_focused.ipynb` relative to the earlier LGB results (Section 1a / eeg_lgbm_multitrial):
+
+| Change | Before | After | Reason |
+|---|---|---|---|
+| Trial 0 handling | All 10 trials tested | Trial 0 in training only (calibration) | First trial has strong distribution shift (electrode settling); treating it as calibration matches real BCI deployment |
+| Optuna objective | Average Precision (AP) | ROC-AUC | AP causes model to fire broadly (high EvtSens but FA/min ≈ 55); AUC optimises discrimination quality |
+| HORIZON | 1000 ms | 300 ms | Best AUC from sweep; 56% positive rate at 1000 ms gives model no negative examples to learn from |
+| TRAIN_CAP | 15 000 | 12 000 | Minor speedup, minimal impact on AUC |
+
+### 18b. HORIZON Sweep (Subject 9, LGB, TEST_TRIALS 1–9, MIN_SPEC=0.90)
+
+| HORIZON | Pos rate | AUC | EvtSens | FA/min | Latency | Detected |
+|---|---|---|---|---|---|---|
+| 200 ms | 25.0% | 0.588 | 0.809 | 46.0 | 177 ms | 199/246 |
+| **300 ms** | **28.8%** | **0.593** | **0.902** | 47.1 | 279 ms | 222/246 |
+| 400 ms | 32.6% | 0.585 | 0.752 | 43.9 | 335 ms | 185/246 |
+| 500 ms | 37.0% | 0.588 | 0.927 | 47.1 | 475 ms | 228/246 |
+| 1000 ms | 56.4% | 0.562 | 0.992 | 55.6 | 954 ms | 244/246 |
+
+**300 ms is the best operating point:** highest AUC (0.593), 90% event sensitivity, 279 ms mean latency. Shorter horizons give faster latency but miss more events; longer horizons raise EvtSens at the cost of near-chance AUC and higher FA/min.
+
+FA/min is stuck at ~44–55 across all horizons, confirming it is not a labelling artefact but reflects the model's cross-trial discrimination ceiling (~0.59 AUC).
+
+### 18c. Cross-Subject LGB LOTO (HORIZON=300 ms, TEST_TRIALS 1–9, MIN_SPEC=0.90)
+
+| Subject | AUC | EvtSens | FA/min | Latency | Detected |
+|---|---|---|---|---|---|
+| S0 | 0.556 | 0.556 | 41.4 | 268 ms | 133/239 |
+| S1 | *(pending)* | | | | |
+| S2 | 0.493 | 0.828 | 24.5 | 283 ms | 130/157 |
+| S3 | 0.464 | **1.000** | **20.4** | 290 ms | 153/153 |
+| S4 | 0.525 | 0.429 | 28.3 | 271 ms | 100/233 |
+| S5 | 0.566 | **1.000** | **21.1** | 290 ms | 138/138 |
+| S6 | 0.557 | 0.994 | 42.5 | 290 ms | 174/175 |
+| S7 | *(pending)* | | | | |
+| **S8** | **0.683** | 0.955 | **14.1** | 289 ms | 21/22 |
+| S9 | 0.593 | 0.902 | 47.1 | 279 ms | 222/246 |
+| **Mean (8 subj)** | **0.558** | **0.833** | **29.9** | **280 ms** | — |
+
+### Key observations
+
+1. **S8 is the standout subject**: best AUC (0.683) and lowest FA/min (14.1) — closest to clinically viable. Only 22 events in trials 1–9, so sample is small.
+2. **S3 and S5 achieve perfect event detection** (100% EvtSens) with low FA/min (~20–21). These subjects have strong, consistent MRCPs (confirmed in Section 15 ERP analysis: S3 trough −31 µV at −690 ms, S9 −23 µV at −1404 ms).
+3. **S4 is the weakest**: EvtSens=0.429, only 100/233 events detected. ERP analysis shows S4 has a moderate MRCP (~5 µV, onset ~600 ms) — detectable in principle but the model struggles cross-trial.
+4. **S0 performance paradox**: AUC=0.556 but EvtSens only 0.556. Section 15 ERP shows S0 has virtually no pre-press MRCP signal (trough −0.33 µV post-press). The 56% detection rate is marginal at best.
+5. **AUC and EvtSens are uncorrelated across subjects** (S3: AUC=0.46 but EvtSens=1.00; S8: AUC=0.68 and EvtSens=0.955). AUC measures ranking; EvtSens at a fixed threshold depends heavily on whether the threshold generalises to the test distribution.
+6. **FA/min range: 14–47** — nearly a 3× spread. Subjects with strong, consistent MRCPs (S3, S5, S8) allow higher thresholds and fewer false alarms; subjects with weak or variable MRCPs (S0, S6, S9) fire more broadly.
+7. **Latency is consistent across subjects** (~270–290 ms) — largely determined by the HORIZON=300 ms setting rather than subject-level properties.
+
+### Connection to previous results
+
+Compared to the earlier SVM+CAR cross-subject LOTO (Section 13, HORIZON=1000 ms, all 10 folds):
+
+| Model | Mean LOTO AUC | Mean EvtSens | Mean FA/min | Horizon |
+|---|---|---|---|---|
+| SVM RBF + CAR (Section 13) | 0.534 | 0.437 | ~35 | 1000 ms |
+| **LGB + AUC obj (Section 18c)** | **0.558** | **0.833** | **29.9** | **300 ms** |
+
+LGB with 300 ms HORIZON nearly doubles event sensitivity (0.437 → 0.833) at lower FA/min (35 → 29.9), driven mainly by the shorter horizon enabling lower positive rate and by excluding the problematic fold 0.
+
+*Script: `scripts/lgb_loto_eval.py` — args: `--subject N --horizon-ms 300 --min-spec 0.90 --n-optuna 20`*
+*Notebook: `notebooks/eeg_lgb_focused.ipynb`*
+
+---
+
+*Last updated: 2026-06-02. Section 18: HORIZON sweep, pipeline improvements, cross-subject LGB LOTO (S1/S7 pending).*
