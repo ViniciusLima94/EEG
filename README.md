@@ -4,58 +4,80 @@ Predicts voluntary button presses from scalp EEG using Motor-Related Cortical Po
 
 ---
 
+## Live Demo
+
+The animation below replays trial 9 of subject 9 through the trained LightGBM model at near real-time speed (≈1×). The 4×4 grid shows the 16 filtered EEG channels scrolling in time. The bottom panel shows the smoothed model probability (teal) with detected press events (white lines) and the 500 ms anticipatory horizon (gold shading). Channels and the probability trace turn **coral** whenever the model fires above threshold.
+
+![Live BCI prediction demo](notebooks/report/live_demo_s9_t9.gif)
+
+---
+
+## Results — LightGBM LOTO (Subject 9)
+
+Evaluated with **Leave-One-Trial-Out** cross-validation across all 10 trials. Threshold selected on each training fold at ≥80% specificity.
+
+| Metric | Value |
+|---|---|
+| LOTO AUC | 0.607 |
+| LOTO AP | 0.270 |
+| Event sensitivity | **70.3 %** (185 / 263 press events detected) |
+| False alarms | 31.1 / min |
+| Mean detection latency | **397 ms before press onset** |
+| Optimal window T | 80 samp = 1.29 s |
+| Features | 192 (temporal + frequency + Hjorth, 16 ch × 12) |
+
+The mean latency of 397 ms confirms anticipatory (not reactive) detection: the model fires inside the readiness-potential buildup window, well before the physical press.
+
+---
+
 ## Project Structure
 
 ```
 EEG/
-├── data/
-│   └── subject{0-9}/
-│       ├── subject_{N}_tache_spt_trial_{0-9}.csv   ← raw recordings
-│       └── model*/                                  ← saved model artefacts
 ├── notebooks/
-│   ├── eeg_lgbm_multitrial.ipynb       ← LightGBM, LOTO CV
-│   ├── eeg_rf_pooled_balanced.ipynb    ← Random Forest, pooled balanced
-│   ├── eeg_svm_multitrial.ipynb        ← SVM RBF + Regularized LDA, LOTO CV
-│   ├── eeg_causal_rf.ipynb             ← Single-trial RF + cross-trial eval
-│   ├── eeg_conv1d_causal.ipynb         ← Conv1D single trial
-│   └── eeg_conv1d_causal_multitrial.ipynb
-└── src/
-    ├── preprocessing.py   ← all signal processing + windowing utilities
-    └── postproc.py        ← event-level BCI metrics, artifact removal
+│   ├── eeg_lgb_focused.ipynb        ← main model: LightGBM LOTO with full visualisations
+│   ├── eeg_lgb_live_demo.ipynb      ← animated live-inference replay → MP4/GIF
+│   ├── eeg_pipeline_walkthrough.ipynb  ← step-by-step preprocessing walkthrough
+│   ├── eeg_svm_multitrial.ipynb     ← SVM RBF + Regularized LDA, LOTO
+│   ├── eeg_conv1d_causal_multitrial.ipynb  ← Conv1D baseline
+│   └── report/                      ← saved plots and animations
+│       ├── lgb_timelines.png        ← per-trial probability timelines
+│       ├── lgb_erp.png              ← event-related probability (ERP-style)
+│       ├── lgb_importance.png       ← feature importance by family
+│       ├── lgb_latency.png          ← detection latency distribution
+│       └── live_demo_s9_t9.gif      ← animated live inference
+├── src/
+│   ├── preprocessing.py  ← signal processing, windowing, EA, feature helpers
+│   └── postproc.py       ← event-level BCI metrics, artifact removal
+├── scripts/
+│   └── lgb_loto_eval.py  ← standalone CLI evaluation script
+└── data/
+    └── subject{0-9}/     ← raw CSV recordings per subject
 ```
 
 ---
 
-## Dataset
+## Data Preprocessing
 
-| Property | Value |
-|---|---|
-| Subjects | 10 (subject 0–9) |
-| Trials per subject | 7–10 |
-| Trial duration | ~60–80 s |
-| Recording rate | 250 Hz |
-| EEG channels | 16 (ch1–ch16) |
-| Task | Voluntary trigger press (self-paced, task = `spt`) |
-
-**Raw CSV columns:** `timestamp`, `ch1`–`ch16`, `button`
-
-- `ch1`–`ch16` are raw EEG voltages in µV (~±100,000 µV before filtering)
-- `button` is 1 while the button is held down, 0 otherwise. A single press lasts ~320–500 ms (80–125 samples at 250 Hz).
-- Trial 0 for subject 9 has 17 presses in 81 s; later trials reach ~30–35 presses in 60–70 s.
-
----
-
-## How Training Data Is Constructed
-
-This is the most important thing to understand. The pipeline has five sequential stages.
+This is the most important thing to understand about the pipeline. Five sequential stages convert raw CSV files into a machine-learning-ready dataset.
 
 ### Stage 1 — Load raw CSV
 
 ```python
 df = pd.read_csv("subject_9_tache_spt_trial_0.csv")
-# df shape: (20338, 18) — 20338 samples × (timestamp + 16 EEG + button)
-# at 250 Hz this is 81 seconds
+# columns: timestamp, ch1–ch16, button
+# ~20 000 samples at 250 Hz ≈ 80 s per trial
 ```
+
+**Raw CSV columns:**
+
+| Column | Description |
+|---|---|
+| `timestamp` | Unix timestamp |
+| `ch1`–`ch16` | Raw EEG in µV (range ≈ ±100 000 µV before filtering) |
+| `button` | 1 while the button is held, 0 otherwise (~380 ms per press) |
+
+The `button` column is converted to **onset-only pulses** immediately after loading — a sustained 1-1-1…1-0 sequence becomes a single 1 at the first sample of each press (`np.diff(b, prepend=0).clip(0)`). This prevents the label from spanning the post-press period.
 
 ### Stage 2 — Band-pass filter (0.5–8 Hz)
 
@@ -63,167 +85,222 @@ df = pd.read_csv("subject_9_tache_spt_trial_0.csv")
 df[eeg_cols] = filter_data(df[eeg_cols].values.T, fs=250, l_freq=0.5, h_freq=8.0).T
 ```
 
-The MRCP (Motor-Related Cortical Potential) is a slow negative drift in the EEG that begins **~1–1.5 s before voluntary movement**. It lives in the **0.5–8 Hz band**:
+The MRCP lives in the **0.5–8 Hz band**:
 
-- Below 0.5 Hz: electrode drift, sweat artefacts — noise, not signal
-- 0.5–4 Hz (delta): the slow readiness ramp (Bereitschaftspotential)
-- 4–8 Hz (theta): faster motor-preparation oscillations
+- **< 0.5 Hz** — electrode drift, sweat artefacts: pure noise
+- **0.5–4 Hz (delta)** — Bereitschaftspotential: slow negative readiness ramp starting ~1.5 s before movement
+- **4–8 Hz (theta)** — faster motor-preparation oscillations
+- **> 8 Hz** — EMG, alpha, and higher-frequency artefacts: removed
 
-Filtering removes everything outside this band. The raw amplitudes (~±100 kµV) become small smooth waves (~±few µV).
+Raw amplitudes (±100 kµV) become smooth slow waves (±few µV) after filtering.
 
-### Stage 3 — Decimate to 62 Hz
+### Stage 3 — Spatial filtering and normalisation
+
+Two optional but active steps applied after bandpass filtering:
+
+**Common Average Reference (CAR):** subtracts the instantaneous mean across all 16 channels from each channel sample. Suppresses volume-conducted common-mode noise and highlights spatially focal activity.
 
 ```python
-from scipy.signal import decimate
-eeg_dec = decimate(df[eeg_cols].values, q=4, axis=0, zero_phase=True)
-# shape: (5085, 16) — every 4th sample kept, anti-aliased
-# effective rate: 250 / 4 = 62.5 Hz ≈ FS_EFF = 62 Hz
+arr -= arr.mean(axis=1, keepdims=True)   # (N_samp, C) in-place
 ```
 
-After filtering, the signal has no content above 8 Hz, so 62 Hz is more than sufficient (Nyquist = 31 Hz). Decimation reduces memory by 4× and speeds up windowing.
+**Per-trial z-score:** normalises each channel over the full trial duration (mean = 0, std = 1). Removes trial-to-trial amplitude shifts caused by fatigue and electrode drift without touching the temporal structure.
 
-**After this stage:** one trial = ~5000 samples at 62 Hz instead of ~20000 at 250 Hz.
+```python
+arr = (arr - arr.mean(axis=0)) / (arr.std(axis=0) + 1e-8)
+```
 
-### Stage 4 — Build anticipatory labels (`make_horizon_labels`)
+### Stage 4 — Decimate to 62 Hz
 
-This is the key step that makes the problem learnable.
+```python
+eeg_dec = decimate(arr, q=4, axis=0, zero_phase=True)
+# 250 Hz → 62 Hz  (~5 000 samples per trial instead of ~20 000)
+```
 
-**The raw `button` column is NOT used directly as a label.** Here is why:
+After the 8 Hz low-pass, no signal content exists above 8 Hz. The Nyquist limit for 62 Hz is 31 Hz — well above the signal band. Decimation reduces memory and windowing cost by 4×.
 
-The button is 1 for ~380 ms after the subject decides to press. That single-sample onset tells the model *when* the press happened — but to be useful for a BCI, the model needs to predict the press *before* it happens. The MRCP provides a detectable neural signature starting 1–1.5 s before the movement onset.
+### Stage 5 — Anticipatory horizon labels
 
-`make_horizon_labels` converts the momentary press signal into an anticipatory label:
+This step makes the problem learnable as a classification task.
+
+The raw `button` column marks *when* a press happened. To be useful for a BCI, the model must predict the press **before** it occurs. `make_horizon_labels` converts the momentary onset signal into an anticipatory label:
 
 ```
 y_horizon[i] = 1   if any press occurs in y[i : i + HORIZON]
-y_horizon[i] = 0   otherwise
+             = 0   otherwise
 ```
 
-With `HORIZON = int(1.0 * 62) = 62 samples = 1000 ms`:
+With `HORIZON = 31 samples = 500 ms` at 62 Hz:
 
 ```
 sample  y_momentary  y_horizon   notes
-  1430       0           0      (before the 1 s window)
-  1431       0           1      (984 ms before press onset)  ← label flips to 1
-  1432       0           1      (968 ms before press onset)
-    ...
-  1491       0           1      (16 ms before press onset)
-  1492       1           1      <-- press ONSET (button goes 0→1)
-  1493       1           1
-    ...
+   960       0           0       (before the 500 ms window)
+   961       0           1       ← label flips 500 ms before press
+   ...
+   991       0           1       (16 ms before press onset)
+   992       1           1       ← press ONSET
 ```
 
-**Effect on class balance (trial 0, single trial):**
+**Effect on class balance (all trials pooled, subject 9):**
 
 | Labels | Class 0 | Class 1 | % positive |
 |---|---|---|---|
-| `y_momentary` (raw button) | 4,663 | 406 | 8.0% |
-| `y_horizon` (1000 ms lookahead) | 3,626 | 1,443 | **28.5%** |
+| `y_momentary` (raw onset) | ~40 000 | ~263 | 0.6 % |
+| `y_horizon` (500 ms lookahead) | ~33 000 | ~8 100 | **19.6 %** |
 
-The minority class grows ~3.5×, giving the model a much stronger training signal.
+The minority class grows ~30×, giving the model a meaningful training signal.
 
-### Stage 5 — Build causal sliding windows (`build_windows`)
+### Stage 6 — Causal sliding windows
 
-The model does not see individual EEG samples — it sees a **window** of T consecutive samples ending at the current time:
+The model receives a **T-sample look-back window** ending at the current time:
 
 ```
-Window i covers X[i-T : i]  →  predicts label y[i]
+Window i covers X[i-T : i]  →  predicts label y_horizon[i]
 ```
+
+Windows are built at `T_MAX = 124 samples (2 s)` once and sliced per Optuna trial:
 
 ```python
-X_win, y_win = build_windows(X, y_horizon, T=62, stride=1)
-# X shape before:  (5085, 16)   — N samples × C channels
-# X_win shape:     (5023, 992)  — M windows × (C×T features), M = N - T
-# y_win shape:     (5023,)      — one label per window endpoint
+X_max = build_windows(X_all, y_all, T=T_MAX, per_window_norm=False)
+# shape: (41 104, 124, 16)  — M windows × T_MAX timesteps × C channels
+
+# Optuna slices cheaply:
+X_t = X_max[:, -T_opt:, :]   # last T_opt timesteps
 ```
 
-**Inside each window, per-window z-score normalisation is applied:**
+This pre-computation pattern means 25 Optuna trials with different window lengths cost one window build instead of 25.
 
-```python
-w = X[i-T : i]          # (T, C) — raw window
-mu = w.mean(axis=0)      # (C,)   — per-channel mean
-sd = w.std(axis=0) + ε   # (C,)   — per-channel std
-w = (w - mu) / sd        # (T, C) — normalised
-```
-
-This removes trial-level and session-level amplitude drift independently in every window, so the model sees *relative* EEG shape rather than absolute amplitude. This is critical for cross-trial generalisation.
-
-The final feature vector is `w.flatten()` → shape `(C×T,)`. For C=16 channels and T=62 samples (1 s), that is **992 features per window**.
-
----
-
-## Full Pipeline Summary
+### Full preprocessing summary
 
 ```
-Raw CSV (250 Hz, ~20k samples, button 0/1)
+Raw CSV  (250 Hz · ~20k samples · button 0/1)
         │
-        ▼ filter_data(lp=0.5, hp=8.0)    — keep 0.5–8 Hz MRCP band
+        ▼  band-pass 0.5–8 Hz (MNE filter_data)
         │
-        ▼ decimate(q=4)                   — 250 Hz → 62 Hz  (~5k samples)
+        ▼  CAR  — subtract instantaneous channel mean
         │
-        ▼ make_horizon_labels(HORIZON=62) — y[i]=1 if press within next 1 s
+        ▼  per-trial z-score  — remove amplitude drift
         │
-        ▼ build_windows(T=T, stride=1)   — causal windows, per-window z-score
+        ▼  decimate ×4  →  62 Hz  (~5k samples)
         │
- (M windows × C×T features,  M labels)
+        ▼  onset-only button  (np.diff.clip(0))
         │
-        ▼ Classifier (RF / LightGBM / SVM / LDA)
+        ▼  make_horizon_labels(HORIZON=31)  →  y[i]=1 if press within 500 ms
         │
- P(press in next 1 s) per sample
+        ▼  build_windows(T_MAX=124, stride=1)
         │
-        ▼ smooth_probs (rolling mean, 500 ms)
-        │
-        ▼ threshold (max sensitivity s.t. specificity ≥ 0.80)
-        │
- Binary prediction: "press imminent" / "idle"
+  (41 104 windows × 124 timesteps × 16 channels)
 ```
 
 ---
 
-## Cross-Trial Generalisation
+## Feature Engineering
 
-The main challenge is that the MRCP amplitude and shape vary across trials (fatigue, attention, electrode drift). The multi-trial notebooks address this differently:
+Three complementary feature families are computed per window, all vectorised over the `(N, T, C)` window batch:
 
-| Notebook | Strategy | CV Method |
+### Temporal features — `C × 6 = 96`
+
+| Feature | Description |
+|---|---|
+| `mean` | Per-channel mean (DC offset / slow drift) |
+| `std` | Per-channel standard deviation (signal power) |
+| `slope` | Least-squares linear trend (captures the MRCP ramp) |
+| `min` | Per-channel minimum value (trough of readiness potential) |
+| `argmin` | Normalised position of the minimum (temporal location) |
+| `rms` | Root mean square (energy) |
+
+### Frequency features — `C × 3 = 48`
+
+Computed via Welch's method (`nperseg=min(T, 64)`):
+
+| Feature | Description |
+|---|---|
+| `delta` | Band power 0.5–4 Hz (Bereitschaftspotential band) |
+| `theta` | Band power 4–8 Hz (motor-preparation oscillations) |
+| `entropy` | Normalised spectral entropy (signal complexity) |
+
+### Hjorth parameters — `C × 3 = 48`
+
+Rotation-invariant temporal descriptors from the MRCP literature:
+
+| Feature | Formula | Meaning |
 |---|---|---|
-| `eeg_lgbm_multitrial` | Train on all 9 other trials, test on 1 | LOTO (Leave-One-Trial-Out) |
-| `eeg_svm_multitrial` | Same | LOTO |
-| `eeg_rf_pooled_balanced` | Pool all train trials, K-balanced sample | GroupKFold(3) by trial ID in CV |
-| `eeg_causal_rf` | Single training trial, evaluate on all others | N/A (no CV — single split) |
+| `activity` | `var(x)` | Signal power |
+| `mobility` | `√(var(x') / var(x))` | Approximate mean frequency |
+| `complexity` | `mobility(x'') / mobility(x')` | Rate of frequency change |
 
-**GroupKFold is essential:** adjacent EEG windows share T-1 overlapping samples. If the same-trial windows end up in both train and val, AUC will be inflated because the model has seen near-identical inputs. GroupKFold ensures all windows from a given trial stay in the same fold.
-
----
-
-## Window Boundary Safety
-
-`build_windows` skips any window whose T-sample lookback would cross a trial boundary:
-
-```python
-for i in range(T, N, stride):
-    if groups[i] != groups[i - T]:
-        continue   # window would span two trials — skip
-```
-
-Without this, the first T windows of each trial would include EEG from the previous trial — corrupting the temporal context.
+**Total: 192 features** per window (16 channels × 12 features).
 
 ---
 
-## Pre-computation Pattern (multi-trial notebooks)
+## Model — LightGBM with Euclidean Alignment
 
-Building windows is the expensive step. The notebooks pre-compute at `T_MAX` once:
+### Per-fold Euclidean Alignment (EA)
+
+The MRCP amplitude and spatial covariance shift across trials (fatigue, re-attachment). EA whitens each fold's training windows to identity covariance before feature extraction:
 
 ```python
-_X_max = build_windows(X_all, y_all, T=T_MAX)  # (M, T_MAX, C)
+# Fit on training windows only
+covs  = X_tr.transpose(0,2,1) @ X_tr / T        # (N_tr, C, C)
+R_bar = covs.mean(axis=0)                         # (C, C)
+W     = inv(sqrtm(R_bar)).real                    # (C, C) whitening matrix
 
-# Optuna then slices cheaply:
-def get_windows_for_T(T):
-    X = _X_max[:, T_MAX - T:, :]  # last T timesteps
-    # z-score per window
-    return X.reshape(M, T * C), y_all
+# Apply to train and test
+X_tr_aligned = X_tr @ W.T
+X_te_aligned = X_te @ W.T    # same W — no test leakage
 ```
 
-This means 100 Optuna trials with different T values cost ~1 window build instead of 100.
+This step is applied **inside every LOTO fold** so the whitening matrix is never estimated on test data.
+
+### Hyperparameter search (Optuna)
+
+25 Optuna trials jointly search the **window length T** and LightGBM hyperparameters, using AUC-ROC as the objective on 5 held-out folds:
+
+| Search space | Range |
+|---|---|
+| Window T | 12–124 samp (194 ms – 2 s) |
+| `n_estimators` | 100–600 |
+| `learning_rate` | 0.01–0.30 (log) |
+| `max_depth` | 3–9 |
+| `num_leaves` | 15–127 |
+| `min_child_samples` | 10–120 |
+| `subsample` | 0.5–1.0 |
+| `colsample_bytree` | 0.5–1.0 |
+| `reg_lambda` | 0.001–10 (log) |
+
+**Why AUC-ROC as the Optuna objective (not AP):** the threshold is calibrated post-hoc at a fixed specificity operating point, so the search should optimise pure ranking quality — which AUC measures directly and independently of class ratio.
+
+### LOTO cross-validation
+
+Full Leave-One-Trial-Out: each of the 10 trials is held out once. For each fold:
+
+1. Apply EA (fit W on training windows only)
+2. Compute features from EA-aligned windows
+3. Subsample training set to `TRAIN_CAP = 50 000` windows (preserves class ratio via random draw)
+4. Fit `LGBMClassifier(class_weight="balanced", ...)`
+5. Score training fold → select threshold at `MIN_SPEC` specificity on the training ROC curve
+6. Score test fold → report AUC, AP, and event-level metrics
+
+Threshold is the mean of the 10 per-fold training thresholds, applied to the smoothed test scores.
+
+---
+
+## Evaluation Metrics
+
+**Sample-level:**
+- **AUC-ROC** — ranking quality, threshold-independent
+- **AP** — area under precision-recall curve, sensitive to imbalance
+
+**Event-level** (`event_detection_metrics` in `src/postproc.py`)  
+More relevant to real BCI use: was each discrete press event detected before it happened?
+
+| Metric | Definition |
+|---|---|
+| `event_sensitivity` | Fraction of press events where `max(P) ≥ threshold` in the 500 ms pre-press window |
+| `fa_per_minute` | Threshold crossings outside any event window, per minute of recording |
+| `mean_latency_ms` | Mean ms before press onset at which the threshold was first crossed |
+
+A **500 ms refractory period** is applied to FA counting: after any detection (TP or FA), the next 500 ms cannot open a new FA. The refractory is validated against the 5th-percentile inter-press interval (IPI p5 = 1523 ms >> 500 ms refractory → no real events suppressed).
 
 ---
 
@@ -234,26 +311,29 @@ This means 100 Optuna trials with different T values cost ~1 window build instea
 | `FS` | 250 Hz | Raw recording rate |
 | `DECIM` | 4 | Downsampling factor |
 | `FS_EFF` | 62 Hz | Effective rate after decimation |
-| `LP` | 0.5 Hz | High-pass cutoff (removes electrode drift) |
-| `HP` | 8.0 Hz | Low-pass cutoff (removes EMG / alpha) |
-| `HORIZON` | 62 samples = 1000 ms | Anticipatory label lookahead |
-| `T_MAX` | 62–93 samples | Maximum window length searched by Optuna |
-| `STRIDE` | 1 | Window step size (1 = one window per sample) |
-| `SMOOTH_WINDOW` | 31 samples = 500 ms | Causal rolling-mean smoothing of output probabilities |
+| `LP` | 0.5 Hz | High-pass cutoff |
+| `HP` | 8.0 Hz | Low-pass cutoff |
+| `HORIZON` | 31 samp = **500 ms** | Anticipatory label lookahead |
+| `T_MAX` | 124 samp = 2.0 s | Maximum window length (Optuna upper bound) |
+| `T_OPT` | ~80 samp = 1.29 s | Optimal window (found by Optuna) |
+| `SMOOTH_WIN` | 6 samp = 97 ms | Causal rolling-mean on output probabilities |
+| `REFRACTORY` | 31 samp = 500 ms | Post-detection FA suppression window |
+| `MIN_SPEC` | 0.80–0.90 | Minimum specificity for threshold selection |
+| `TRAIN_CAP` | 50 000 | Max windows per LOTO training fold |
 
 ---
 
 ## Key Signals & Literature
 
 **MRCP components targeted:**
-- **Bereitschaftspotential (BP)** — slow negative drift starting ~1.5 s before movement, max at Cz
-- **Motor Potential (MP)** — steeper negative slope ~500 ms before movement
-- **Negative Slope (NS')** — peak negativity immediately before movement
+
+- **Bereitschaftspotential (BP)** — slow negative drift from ~−1.5 s, maximal at Cz
+- **Motor Potential (MP)** — steeper negative slope from ~−500 ms
+- **Negative Slope (NS')** — peak negativity just before movement onset
 
 **References:**
-- Lotte et al. 2007 — *A review of classification algorithms for EEG-based BCIs*
-  - Best performing: SVM with Gaussian/RBF kernel (~96.8% accuracy for MRCP)
-  - Regularized LDA (Ledoit-Wolf) competitive and interpretable
-- Shakeel et al. 2016 — *A Review of Techniques for Detection of Movement Intention Using MRCPs*
-  - Matched filter (template correlation) achieves ~12 ms detection latency
-  - 0.5–8 Hz bandpass recommended; HORIZON ≥ 1000 ms to capture full BP
+
+- Lotte et al. 2007 — *A review of classification algorithms for EEG-based BCIs*  
+  SVM with Gaussian/RBF kernel achieves ~96.8 % accuracy for MRCP; Regularized LDA competitive and interpretable.
+- Shakeel et al. 2016 — *A Review of Techniques for Detection of Movement Intention Using MRCPs*  
+  Matched-filter (template correlation) achieves ~12 ms detection latency; 0.5–8 Hz bandpass and HORIZON ≥ 500 ms recommended.
