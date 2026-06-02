@@ -1,2 +1,7 @@
 *.png
 *.pdf
+.ai.code.files
+.claude
+.github
+.ipynb_checkpoints
+.virtual_documents/notebooks
