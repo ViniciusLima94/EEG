@@ -1,9 +1,9 @@
 """
-Causal Conv1D model for EEG sliding-window classification.
+Causal Conv1D models for EEG sliding-window classification.
 
 Usage
 -----
-from src.models.conv1d import CausalConv1D, make_model
+from src.model.conv1d import CausalConv1D, DSCausalConv1D, make_model
 """
 
 from __future__ import annotations
@@ -85,6 +85,110 @@ class CausalConv1D(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T)
         x = self.conv_stack(x)                            # (B, last_ch, T)
+        return self.head(self.pool(x).squeeze(-1)).squeeze(1)  # (B,)
+
+
+class _DSBlock(nn.Module):
+    """
+    One depthwise-separable causal conv block.
+
+    Step 1 — depthwise temporal:
+        Conv1d(C, C×D, k, groups=C) + causal trim + [BN] + act
+        Each input channel gets D independent temporal filters.
+
+    Step 2 — pointwise spatial:
+        Conv1d(C×D, out_ch, 1) + [BN] + act + [Dropout]
+        Mixes the C×D feature maps into out_ch spatial combinations.
+    """
+
+    ACTIVATIONS = {
+        "relu": nn.ReLU,
+        "leaky_relu": nn.LeakyReLU,
+        "elu": nn.ELU,
+        "gelu": nn.GELU,
+    }
+
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        kernel_size: int,
+        depth_mult: int,
+        dropout_rate: float,
+        activation: str,
+        use_bn: bool,
+    ):
+        super().__init__()
+        Act = self.ACTIVATIONS[activation]
+        pad = kernel_size - 1
+        mid_ch = in_ch * depth_mult
+
+        dw: list[nn.Module] = [
+            nn.Conv1d(in_ch, mid_ch, kernel_size=kernel_size, padding=pad, groups=in_ch),
+            _Trim(pad),
+        ]
+        if use_bn:
+            dw.append(nn.BatchNorm1d(mid_ch))
+        dw.append(Act())
+        self.dw = nn.Sequential(*dw)
+
+        pw: list[nn.Module] = [nn.Conv1d(mid_ch, out_ch, kernel_size=1)]
+        if use_bn:
+            pw.append(nn.BatchNorm1d(out_ch))
+        pw.append(Act())
+        if dropout_rate > 0:
+            pw.append(nn.Dropout(dropout_rate))
+        self.pw = nn.Sequential(*pw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.pw(self.dw(x))
+
+
+class DSCausalConv1D(nn.Module):
+    """
+    Depthwise-separable causal Conv1D classifier for EEG.
+
+    Input  : (batch, C, T)  — channels first, causal window
+    Output : (batch,)       — raw logit
+
+    Each block:
+      depthwise temporal conv (D filters per channel, causal)
+      → pointwise spatial mix (learned spatial combination)
+
+    Fewer parameters than standard Conv1D; closer to LGB's per-channel
+    filter-bank + linear combination structure.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        n_filters: int,
+        n_layers: int,
+        kernel_size: int,
+        depth_mult: int = 2,
+        grow_filters: bool = True,
+        dropout_rate: float = 0.3,
+        activation: str = "gelu",
+        use_bn: bool = True,
+    ):
+        super().__init__()
+        blocks: list[nn.Module] = []
+        in_ch = in_channels
+
+        for i in range(n_layers):
+            out_ch = min(n_filters * (2**i) if grow_filters else n_filters, 256)
+            blocks.append(
+                _DSBlock(in_ch, out_ch, kernel_size, depth_mult,
+                         dropout_rate, activation, use_bn)
+            )
+            in_ch = out_ch
+
+        self.blocks = nn.Sequential(*blocks)
+        self.pool   = nn.AdaptiveAvgPool1d(1)
+        self.head   = nn.Linear(in_ch, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B, C, T)
+        x = self.blocks(x)                               # (B, last_ch, T)
         return self.head(self.pool(x).squeeze(-1)).squeeze(1)  # (B,)
 
 

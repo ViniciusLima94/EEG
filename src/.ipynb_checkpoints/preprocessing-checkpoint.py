@@ -13,6 +13,7 @@ from src.preprocessing import euclidean_align
 from __future__ import annotations
 
 import os
+import csv
 from typing import Optional
 
 import numpy as np
@@ -33,31 +34,42 @@ def load_trial(
     decimate: int = 1,
     car: bool = False,
     trial_zscore: bool = False,
+    clip_percentile: float = 0.0,
+    channels: Optional[list] = None,
 ) -> tuple[pd.DataFrame, list]:
     """
     Load one CSV trial, optionally band-pass filter it and/or decimate.
 
     Parameters
     ----------
-    subject      : subject index (0-based)
-    tache        : task name, e.g. "spt"
-    trial        : trial index
-    data_path    : directory containing the CSV files
-    eeg_cols     : expected channel list; asserted if provided
-    fs           : sampling frequency (Hz) of the raw recording
-    lp, hp       : band-pass cut-offs (Hz). Defaults 0.5–8 Hz target the MRCP
-                   delta/theta band while rejecting sub-Hz electrode drift.
-    apply_filter : whether to run the MNE band-pass filter
-    decimate     : integer downsampling factor applied after filtering.
-                   Uses scipy.signal.decimate (zero-phase, anti-aliased).
-                   Effective fs after loading = fs // decimate. Default 1 = off.
-    car          : if True, apply Common Average Reference after filtering:
-                   subtract the instantaneous mean across all channels from each
-                   channel. Reduces volume-conducted common-mode noise.
-    trial_zscore : if True, z-score each channel over the full trial duration
-                   after CAR (mean=0, std=1 per channel). Removes session-level
-                   amplitude differences that cause trial-to-trial distribution
-                   shift — complementary to EA which removes covariance drift.
+    subject          : subject index (0-based)
+    tache            : task name, e.g. "spt"
+    trial            : trial index
+    data_path        : directory containing the CSV files
+    eeg_cols         : expected channel list; asserted if provided
+    fs               : sampling frequency (Hz) of the raw recording
+    lp, hp           : band-pass cut-offs (Hz). Defaults 0.5–8 Hz target the MRCP
+                       delta/theta band while rejecting sub-Hz electrode drift.
+    apply_filter     : whether to run the MNE band-pass filter
+    decimate         : integer downsampling factor applied after filtering.
+                       Uses scipy.signal.decimate (zero-phase, anti-aliased).
+                       Effective fs after loading = fs // decimate. Default 1 = off.
+    car              : if True, apply Common Average Reference after filtering:
+                       subtract the instantaneous mean across all channels from each
+                       channel. CAR is computed on the full montage before any
+                       channel subsetting, preserving the correct common average.
+    trial_zscore     : if True, z-score each channel over the full trial duration
+                       after CAR (mean=0, std=1 per channel). Removes session-level
+                       amplitude differences that cause trial-to-trial distribution
+                       shift — complementary to EA which removes covariance drift.
+    clip_percentile  : if > 0, replace per-channel samples outside
+                       [clip_percentile, 100-clip_percentile] with the channel median.
+                       Applied after trial_zscore. Typical value: 1.0 (i.e. p1/p99).
+    channels         : if provided, subset the returned DataFrame and channel list
+                       to this ordered list of channel names after all processing.
+                       All channels must exist in the file. CAR (if enabled) is
+                       computed on the full montage before subsetting.
+                       Example: channels=["ch1", "ch2", "ch9"]
 
     Returns
     -------
@@ -67,15 +79,20 @@ def load_trial(
     path = os.path.join(
         data_path, f"subject_{subject}_tache_{tache}_trial_{trial}.csv"
     )
-    df = pd.read_csv(path)
-    cols = [c for c in df.columns if c not in ("button", "timestamp")]
+    
+    sniffer = csv.Sniffer()
+    delimiter = sniffer.sniff(open(path, "r").read(4096)).delimiter
+    df = pd.read_csv(path, delimiter=delimiter)
+    
+    cols = [c for c in df.columns if c not in ("button", "timestamp", "led")]
     if eeg_cols is not None:
-        assert cols == eeg_cols, (
-            f"Trial {trial} channel mismatch: expected {eeg_cols}, got {cols}"
+        validate_against = list(channels) if channels is not None else cols
+        assert list(eeg_cols) == validate_against, (
+            f"Trial {trial} channel mismatch: expected {eeg_cols}, got {validate_against}"
         )
     if apply_filter:
-        df.iloc[:, 1:-1] = filter_data(
-            df.iloc[:, 1:-1].values.T, fs, lp, hp, verbose=False
+        df[cols] = filter_data(
+            df[cols].values.T, fs, lp, hp, verbose=False
         ).T
     if car:
         arr = df[cols].values.astype(np.float64)
@@ -85,15 +102,31 @@ def load_trial(
         arr = df[cols].values.astype(np.float64)
         arr = (arr - arr.mean(axis=0)) / (arr.std(axis=0) + 1e-8)
         df[cols] = arr
+    if clip_percentile > 0.0:
+        arr = df[cols].values.astype(np.float64)
+        lo  = np.percentile(arr, clip_percentile, axis=0)
+        hi  = np.percentile(arr, 100.0 - clip_percentile, axis=0)
+        med = np.mean(arr, axis=0)
+        arr = np.where((arr < lo) | (arr > hi), 0, arr)
+        df[cols] = arr
     if decimate > 1:
         from scipy.signal import decimate as sp_decimate
         eeg_decimated = sp_decimate(df[cols].values, decimate, axis=0, zero_phase=True)
         n_out = eeg_decimated.shape[0]
         df = df.iloc[::decimate].iloc[:n_out].reset_index(drop=True)
         df[cols] = eeg_decimated
+    if channels is not None:
+        missing = [c for c in channels if c not in cols]
+        if missing:
+            raise ValueError(f"Trial {trial}: requested channels not found: {missing}")
+        cols = list(channels)
+        df = df[["timestamp"] + cols + ["button"]].copy()
     # Keep only the rising edge of each button press (011110 → 010000)
-    b = df["button"].values
+    b = df["button"].to_numpy()
     df["button"] = np.diff(b, prepend=0).clip(0).astype(b.dtype)
+    if "led" in df.columns:
+        l = df["led"].to_numpy()
+        df["led"] = np.diff(l, prepend=0).clip(0).astype(l.dtype)
     return df, cols
 
 

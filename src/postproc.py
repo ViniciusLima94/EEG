@@ -161,6 +161,31 @@ def event_detection_metrics(
     }
 
 
+def persistence_gate(probs: np.ndarray, k: int) -> np.ndarray:
+    """
+    Rolling-minimum persistence filter for BCI output probabilities.
+
+    Replaces each probability with the minimum over the last k samples.
+    The result exceeds threshold only when k consecutive frames are all above
+    threshold, eliminating transient spikes without changing the threshold value.
+
+    Parameters
+    ----------
+    probs : (N,) smoothed probability array
+    k     : persistence window in samples (1 = no filtering)
+
+    Returns
+    -------
+    probs_gated : (N,) filtered probability array (same range as input)
+    """
+    if k <= 1:
+        return probs.copy()
+    out = probs.copy().astype(np.float32)
+    wins = np.lib.stride_tricks.sliding_window_view(out, k)
+    out[k - 1:] = wins.min(axis=1)
+    return out
+
+
 def extract_features(window: np.ndarray, fs: float, BANDS: dict) -> np.ndarray:
     """window shape: (n_samples, n_channels) → 1-D feature vector."""
     feats = []

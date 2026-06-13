@@ -291,14 +291,14 @@ Threshold is the mean of the 10 per-fold training thresholds, applied to the smo
 - **AUC-ROC** — ranking quality, threshold-independent
 - **AP** — area under precision-recall curve, sensitive to imbalance
 
-**Event-level** (`event_detection_metrics` in `src/postproc.py`)  
+**Event-level** (`event_detection_metrics` in `src/postproc.py`) 
 More relevant to real BCI use: was each discrete press event detected before it happened?
 
-| Metric | Definition |
-|---|---|
+| Metric              | Definition                                                                         |
+|---------------------|------------------------------------------------------------------------------------|
 | `event_sensitivity` | Fraction of press events where `max(P) ≥ threshold` in the 500 ms pre-press window |
-| `fa_per_minute` | Threshold crossings outside any event window, per minute of recording |
-| `mean_latency_ms` | Mean ms before press onset at which the threshold was first crossed |
+| `fa_per_minute`     | Threshold crossings outside any event window, per minute of recording              |
+| `mean_latency_ms`   | Mean ms before press onset at which the threshold was first crossed                |
 
 A **500 ms refractory period** is applied to FA counting: after any detection (TP or FA), the next 500 ms cannot open a new FA. The refractory is validated against the 5th-percentile inter-press interval (IPI p5 = 1523 ms >> 500 ms refractory → no real events suppressed).
 
