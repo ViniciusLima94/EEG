@@ -127,20 +127,36 @@ def train_model(
     y_h = make_horizon_labels(btn_edges, HORIZON)
 
     # Sliding windows (no per-window z-score — trial z-score already applied above)
-    wins, labels = [], []
+    wins, labels, mom_labels = [], [], []
     for i in range(T_WIN, len(X_dec)):
         wins.append(X_dec[i - T_WIN : i].astype(np.float32))
         labels.append(int(y_h[i]))
+        mom_labels.append(int(btn_edges[i]))
 
     X_win = np.array(wins)  # (M, T, C)
     y_win = np.array(labels)  # (M,)
+    y_mom_win = np.array(mom_labels, dtype=np.int64)  # (M,) momentary press labels
 
     # Euclidean Alignment — fit on all windows, keep W for online use
     X_ea, W = euclidean_align(X_win)
 
+    # MF template: mean of EA-aligned windows at press onset
+    press_idx = np.where(y_mom_win > 0)[0]
+    if len(press_idx) > 0:
+        mf_template = X_ea[press_idx].mean(axis=0).astype(np.float32)  # (T_WIN, N_CH)
+    else:
+        mf_template = np.zeros((T_WIN, N_CH), dtype=np.float32)
+
     # Feature extraction
     print(f"  Extracting features from {len(X_ea)} windows…", flush=True)
     feats = np.array([extract_features(w, FS_EFF) for w in X_ea])
+
+    # Matched-filter features (one correlation score per channel)
+    _t_norm = (mf_template - mf_template.mean(0)) / (mf_template.std(0) + 1e-8)
+    _mu = X_ea.mean(axis=1, keepdims=True)
+    _sd = X_ea.std(axis=1, keepdims=True) + 1e-8
+    mf_feats = ((X_ea - _mu) / _sd * _t_norm[None]).mean(axis=1).astype(np.float32)
+    feats = np.concatenate([feats, mf_feats], axis=1)
 
     # Temporal 80/20 train/test split
     split = int(0.8 * len(feats))
@@ -182,6 +198,7 @@ def train_model(
     return dict(
         model=model,
         W=W,
+        mf_template=mf_template,
         T_OPT=T_WIN,
         FS=FS,
         DECIM=DECIM,
@@ -323,8 +340,11 @@ def main():
     REFRACTORY = int(m["REFRACTORY"])
     clip_lo = m["clip_lo"].astype(np.float32)
     clip_hi = m["clip_hi"].astype(np.float32)
-    USE_FILTER = bool(m.get("USE_FILTER", True))
-    USE_EA     = bool(m.get("USE_EA", True))
+    USE_FILTER  = bool(m.get("USE_FILTER", True))
+    USE_EA      = bool(m.get("USE_EA", True))
+    mf_template = m.get("mf_template", None)
+    if mf_template is not None:
+        mf_template = mf_template.astype(np.float32)
 
     if not USE_FILTER:
         print("  [info] bandpass filter disabled (training setting) — applying CAR only")
@@ -384,6 +404,11 @@ def main():
         else:
             win = win_arr.astype(np.float32)
         feats = extract_features(win, FS_EFF)
+        if mf_template is not None:
+            t_norm = (mf_template - mf_template.mean(0)) / (mf_template.std(0) + 1e-8)
+            mu_mf = win.mean(0); sd_mf = win.std(0) + 1e-8
+            mf = ((win - mu_mf) / sd_mf * t_norm).mean(0).astype(np.float32)
+            feats = np.concatenate([feats, mf])
         score = float(model.predict_proba(feats[None, :])[0, 1])
         score_buf.append(score)
         score_s = float(np.mean(score_buf))
