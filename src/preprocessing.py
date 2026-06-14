@@ -290,19 +290,21 @@ def _temporal(w: np.ndarray, n_segs: int = 4) -> np.ndarray:
 
 
 def _freq(w: np.ndarray, fs: float) -> np.ndarray:
-    """(T, C) → (C*3,)  [delta_power, theta_power, spectral_entropy] × channel"""
+    """(T, C) → (C*5,)  [delta, theta, alpha, beta, spectral_entropy] × channel"""
     from scipy.signal import welch
     f, p = welch(w.T, fs=fs, nperseg=min(w.shape[0], 64), axis=-1)  # (C, F)
     df   = f[1] - f[0]
-    dp   = p[:, (f >= 0.5) & (f <= 4.0)].sum(-1) * df
-    tp   = p[:, (f >= 4.0) & (f <= 8.0)].sum(-1) * df
+    dp   = p[:, (f >= 0.5) & (f <=  4.0)].sum(-1) * df
+    tp   = p[:, (f >= 4.0) & (f <=  8.0)].sum(-1) * df
+    al   = p[:, (f >= 8.0) & (f <= 13.0)].sum(-1) * df
+    be   = p[:, (f >= 13.0) & (f <= 28.0)].sum(-1) * df
     pn   = p[:, f > 0] / (p[:, f > 0].sum(-1, keepdims=True) + 1e-12)
     se   = -(pn * np.log(pn + 1e-12)).sum(-1)
-    return np.stack([dp, tp, se], axis=1).flatten().astype(np.float32)
+    return np.stack([dp, tp, al, be, se], axis=1).flatten().astype(np.float32)
 
 
 def extract_features(w: np.ndarray, fs: float) -> np.ndarray:
-    """EA-aligned (T, C) → flat feature vector: temporal + freq + Hjorth per channel."""
+    """EA-aligned (T, C) → flat feature vector: temporal (C×10) + freq (C×5) + Hjorth (C×3)."""
     return np.concatenate([_temporal(w), _freq(w, fs), compute_hjorth(w).flatten()])
 
 
