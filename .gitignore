@@ -1,7 +1,49 @@
-*.png
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+.virtual_documents/
+
+# ── Heavy data files ──────────────────────────────────────────────────────────
+data/
+*.mat
+*.zip
+*.csv
+
+# ── Trained models & scalers ──────────────────────────────────────────────────
+*.pkl
+*.joblib
+notebooks/models/
+
+# ── Output / logs ─────────────────────────────────────────────────────────────
+logs/
+predict_log*.csv
+*.gif
 *.pdf
-.ai.code.files
-.claude
-.github
-.ipynb_checkpoints
-.virtual_documents/notebooks
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+.claude/
+CLAUDE.md
+
+# ── Type-checker & IDE caches ────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.virtual_documents/
+
+# ── macOS metadata ────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── LaTeX build artefacts ─────────────────────────────────────────────────────
+*.aux
+*.log
+*.out
+*.toc
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.ai.code.files/
+.github/
+*.png
