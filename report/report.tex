@@ -89,7 +89,7 @@ enter the window — ensures the pipeline is directly deployable for
 online inference.
 
 The model chosen for the final pipeline is \textbf{LightGBM}
-\cite{ke2017lightgbm}, a gradient-boosted decision tree framework that
+[\ref{ke2017lightgbm}], a gradient-boosted decision tree framework that
 handles the high-dimensional tabular feature representation produced by the
 MRCP-targeted feature extractor, scales efficiently to the dataset size, and
 produces well-calibrated probabilities without a GPU.
@@ -332,7 +332,7 @@ sliced per Optuna trial to avoid rebuilding windows 25 times:
 
 \begin{lstlisting}[style=pycode]
 X_max, y_all = build_windows(X_all, y_all, T=T_MAX, per_window_norm=False)
-# shape: (M, T_MAX, C) — M windows x 2s x 16 channels
+# shape: (M, T_MAX, C) -- M windows x 2s x 16 channels
 
 # Optuna slices cheaply:
 X_t = X_max[:, -T_opt:, :]   # last T_opt timesteps
@@ -405,7 +405,7 @@ to be invariant to absolute amplitude.
 
 Hjorth parameters are rotation-invariant descriptors of the signal's
 temporal dynamics, widely used in MRCP and motor-imagery literature
-\cite{hjorth1970eeg} because they efficiently characterise slow cortical
+[\ref{hjorth1970eeg}] because they efficiently characterise slow cortical
 potentials without requiring a Fourier transform:
 
 \begin{center}
@@ -462,7 +462,7 @@ The spatial covariance of EEG shifts across trials due to electrode
 impedance drift, fatigue, and adaptation. Without correction, a model
 trained on trials 0--8 may see a different amplitude scale and channel
 correlation structure in trial~9. \textbf{Euclidean Alignment} (EA)
-\cite{he2019transfer} whitens each fold's training windows to identity
+[\ref{he2019transfer}] whitens each fold's training windows to identity
 covariance before feature extraction.
 
 \paragraph{Algorithm.} Given $N_{tr}$ training windows
@@ -488,7 +488,7 @@ R_bar = covs.mean(axis=0)                            # (C, C)
 W_ea  = inv(sqrtm(R_bar)).real                       # (C, C)
 
 X_tr_aligned = X_tr @ W_ea.T   # (N_tr, T, C)
-X_te_aligned = X_te @ W_ea.T   # same W_ea — no test leakage
+X_te_aligned = X_te @ W_ea.T   # same W_ea -- no test leakage
 \end{lstlisting}
 
 \paragraph{Key constraint.} The whitening matrix is estimated \emph{only}
@@ -505,7 +505,7 @@ and the test set is projected into the same normalised space.
 \subsection{Classifier}
 
 The classifier is \textbf{LightGBM} (\texttt{LGBMClassifier}), a
-leaf-wise gradient-boosted tree ensemble \cite{ke2017lightgbm}. Its
+leaf-wise gradient-boosted tree ensemble [\ref{ke2017lightgbm}]. Its
 advantages for this task are:
 
 \begin{itemize}[leftmargin=1.5em]
