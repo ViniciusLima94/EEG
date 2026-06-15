@@ -6,9 +6,9 @@ Predicts voluntary button presses from scalp EEG using Motor-Related Cortical Po
 
 ## Live Demo
 
-The animation below replays trial 7 (go/no-go clean task) of subject 0 through the trained LightGBM model at near real-time speed (≈1×). The 4×4 grid shows the 16 filtered EEG channels scrolling in time. The bottom panel shows the smoothed model probability (teal) with detected press events (white lines) and the 500 ms anticipatory horizon (gold shading). Channels and the probability trace turn **coral** whenever the model fires above threshold.
+The animation below replays a trial through the trained LightGBM model at near real-time speed (≈1×). The 4×4 grid shows the 16 filtered EEG channels scrolling in time. The bottom panel shows the smoothed model probability (teal) with detected press events (white lines) and the 500 ms anticipatory horizon (gold shading). Channels and the probability trace turn **coral** whenever the model fires above threshold.
 
-![Live BCI prediction demo](notebooks/report/live_demo_s0_t7_gng_clean.gif)
+![Live BCI prediction demo](notebooks/report/live_demo_example.gif)
 
 ---
 
@@ -36,21 +36,41 @@ The mean latency of 397 ms confirms anticipatory (not reactive) detection: the m
 EEG/
 ├── notebooks/
 │   ├── eeg_lgb_focused.ipynb        ← main model: LightGBM LOTO with full visualisations
-│   ├── eeg_lgb_live_demo.ipynb      ← animated live-inference replay → MP4/GIF
+│   ├── eeg_lgb_pipeline_opt.ipynb   ← Optuna hyperparameter search
+│   ├── eeg_lgbm_multitrial.ipynb    ← per-trial LOTO evaluation
+│   ├── LGB_analysis_report.ipynb    ← analysis report and figures
+│   ├── eeg_lgb_live_demo.ipynb      ← animated live-inference replay → GIF
 │   ├── eeg_pipeline_walkthrough.ipynb  ← step-by-step preprocessing walkthrough
-│   ├── eeg_svm_multitrial.ipynb     ← SVM RBF + Regularized LDA, LOTO
-│   ├── eeg_conv1d_causal_multitrial.ipynb  ← Conv1D baseline
+│   ├── eeg_pipeline_v2.ipynb        ← pipeline v2 experiments
+│   ├── eeg_erp_evoked.ipynb         ← ERP / evoked-potential analysis
+│   ├── eeg_umap.ipynb               ← UMAP feature-space visualisation
+│   ├── ica_cleaning.ipynb           ← ICA artefact rejection
+│   ├── LabStreamLayer-Test.ipynb    ← LSL stream validation
+│   ├── lsl_single_predict.ipynb     ← single-trial LSL inference notebook
 │   └── report/                      ← saved plots and animations
 │       ├── lgb_timelines.png        ← per-trial probability timelines
 │       ├── lgb_erp.png              ← event-related probability (ERP-style)
 │       ├── lgb_importance.png       ← feature importance by family
 │       ├── lgb_latency.png          ← detection latency distribution
-│       └── live_demo_s0_t7_gng_clean.gif  ← animated live inference
+│       └── live_demo_example.gif    ← animated live inference
 ├── src/
 │   ├── preprocessing.py  ← signal processing, windowing, EA, feature helpers
-│   └── postproc.py       ← event-level BCI metrics, artifact removal
+│   ├── postproc.py       ← event-level BCI metrics, artefact removal
+│   ├── spectral.py       ← spectral feature extraction
+│   ├── io.py             ← data loading utilities
+│   └── model/            ← PyTorch model definitions (MLP, Conv1D)
 ├── scripts/
-│   └── lgb_loto_eval.py  ← standalone CLI evaluation script
+│   ├── lgb_loto_eval.py        ← standalone LightGBM LOTO evaluation
+│   ├── lsl_train_predict.py    ← train + live LSL prediction loop
+│   ├── lsl_predict.py          ← live LSL prediction from a saved model
+│   ├── run_all_subjects.py     ← batch evaluation across all subjects
+│   ├── erp_evoked.py           ← ERP computation script
+│   ├── erp_vs_performance.py   ← correlate ERP amplitude with model AUC
+│   ├── evaluate_trial.py       ← single-trial evaluation helper
+│   ├── inspect_stream.py       ← inspect a live LSL stream
+│   ├── convert_way_eeg_gal.py  ← convert WAY-EEG-GAL dataset
+│   ├── convert_bnci_001_2014.py    ← convert BNCI 2014-001 dataset
+│   └── convert_physionet_eegmmidb.py  ← convert PhysioNet EEG MMIDB
 └── data/
     └── subject{0-9}/     ← raw CSV recordings per subject
 ```
