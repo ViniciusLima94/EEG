@@ -23,7 +23,8 @@ warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 import numpy as np
 from scipy.signal import butter, sosfilt
-from pylsl import StreamInlet, resolve_byprop
+from pylsl import StreamInlet, StreamOutlet, resolve_byprop
+from pylsl.info import StreamInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
@@ -235,7 +236,7 @@ def main():
     last_ts   = 0.0   # LSL timestamp of the most recent raw sample
     last_btn  = 0     # button state from extra stream channel
 
-    def infer() -> None:
+    def infer() -> tuple | None:
         nonlocal last_det
         win_arr = np.array(win_buf, dtype=np.float64)
 
@@ -296,6 +297,8 @@ def main():
             row.append(last_btn)
         log_writer.writerow(row)
 
+        return score, detection
+
     # ── Warmup phase (fill filter transients + z-score buffer) ─────────────────
     warmup_dec = args.warmup * FS_EFF
     if warmup_dec > 0:
@@ -319,6 +322,14 @@ def main():
 
     # ── Detection loop ─────────────────────────────────────────────────────────
     print(f"\n── Detection running  (thresh={thresh:.4f}, Ctrl-C to stop) ──\n", flush=True)
+
+    # Create outlet LSL strem to send predictions
+    outlet_info = StreamInfo(name="prediction_scores",
+                             channel_count=2,
+                             channel_format="float32",
+                             nominal_srate=FS_EFF)
+    outlet = StreamOutlet(outlet_info)
+
     try:
         while True:
             sample, ts = inlet.pull_sample()
@@ -344,9 +355,11 @@ def main():
             n_since_pred += 1
 
             if len(win_buf) == T_OPT and n_since_pred >= HOP:
-                infer()
+                infer_output = infer()
                 n_since_pred = 0
-
+                if infer_output is not None:
+                    outlet.push_sample(list(infer_output))
+                
     except KeyboardInterrupt:
         if args.debug:
             print(f"\n[dbg] final counters: {dbg}", flush=True)
