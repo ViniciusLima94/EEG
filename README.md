@@ -6,9 +6,9 @@ Predicts voluntary button presses from scalp EEG using Motor-Related Cortical Po
 
 ## Live Demo
 
-The animation below replays trial 9 of subject 9 through the trained LightGBM model at near real-time speed (≈1×). The 4×4 grid shows the 16 filtered EEG channels scrolling in time. The bottom panel shows the smoothed model probability (teal) with detected press events (white lines) and the 500 ms anticipatory horizon (gold shading). Channels and the probability trace turn **coral** whenever the model fires above threshold.
+The animation below replays trial 7 (go/no-go clean task) of subject 0 through the trained LightGBM model at near real-time speed (≈1×). The 4×4 grid shows the 16 filtered EEG channels scrolling in time. The bottom panel shows the smoothed model probability (teal) with detected press events (white lines) and the 500 ms anticipatory horizon (gold shading). Channels and the probability trace turn **coral** whenever the model fires above threshold.
 
-![Live BCI prediction demo](notebooks/report/live_demo_s9_t9.gif)
+![Live BCI prediction demo](notebooks/report/live_demo_s0_t7_gng_clean.gif)
 
 ---
 
@@ -45,7 +45,7 @@ EEG/
 │       ├── lgb_erp.png              ← event-related probability (ERP-style)
 │       ├── lgb_importance.png       ← feature importance by family
 │       ├── lgb_latency.png          ← detection latency distribution
-│       └── live_demo_s9_t9.gif      ← animated live inference
+│       └── live_demo_s0_t7_gng_clean.gif  ← animated live inference
 ├── src/
 │   ├── preprocessing.py  ← signal processing, windowing, EA, feature helpers
 │   └── postproc.py       ← event-level BCI metrics, artifact removal

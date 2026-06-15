@@ -1,0 +1,33 @@
+name: eeg
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  # Core scientific stack
+  - numpy>=2.4
+  - pandas>=2.2
+  - scipy>=1.17
+  - scikit-learn>=1.6
+  # EEG / signal processing
+  - mne>=1.12
+  # Machine learning models
+  - lightgbm>=4.6
+  - xgboost>=3.2
+  # Hyperparameter optimisation
+  - optuna>=4.8
+  # Plotting & utilities
+  - matplotlib>=3.10
+  - joblib>=1.4
+  # Notebook
+  - jupyter>=1.1
+  # PyTorch with CUDA — change pytorch-cuda version to match your driver
+  # Run `nvidia-smi` to check: CUDA 12.1 → 12.1, 12.4 → 12.4, etc.
+  - pytorch>=2.5
+  - pytorch-cuda=12.4
+  - pip
+  - pip:
+      # Lab Streaming Layer (not on conda-forge)
+      - pylsl>=1.18

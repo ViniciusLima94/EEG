@@ -381,12 +381,13 @@ def main():
         rz.push(np.clip(x_warm, clip_lo, clip_hi))
     print(" done.", flush=True)
 
-    HOP       = args.hop if args.hop > 0 else T_OPT
-    win_buf:   list = []
-    score_buf = deque([0.0] * SMOOTH_WIN, maxlen=SMOOTH_WIN)
-    n_raw = 0
-    n_dec = 0
-    last_det = -REFRACTORY
+    HOP          = args.hop if args.hop > 0 else 1
+    win_buf      = deque(maxlen=T_OPT)
+    score_buf    = deque([0.0] * SMOOTH_WIN, maxlen=SMOOTH_WIN)
+    n_raw        = 0
+    n_dec        = 0
+    n_since_pred = 0
+    last_det     = -REFRACTORY
 
     print(f"  hop={HOP} samp ({HOP/FS_EFF*1000:.0f} ms per prediction)", flush=True)
 
@@ -396,7 +397,7 @@ def main():
 
     def infer() -> None:
         nonlocal last_det
-        win_arr = np.array(win_buf[:T_OPT], dtype=np.float64)
+        win_arr = np.array(win_buf, dtype=np.float64)
         if not np.isfinite(win_arr).all():
             return
         if USE_EA:
@@ -461,9 +462,10 @@ def main():
                 continue
             win_buf.append(rz.push(x))
             n_dec += 1
-            if len(win_buf) >= T_OPT:
+            n_since_pred += 1
+            if len(win_buf) == T_OPT and n_since_pred >= HOP:
                 infer()
-                win_buf = win_buf[HOP:]
+                n_since_pred = 0
     except KeyboardInterrupt:
         print("\nStopped.")
 

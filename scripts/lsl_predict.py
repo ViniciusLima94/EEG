@@ -143,7 +143,7 @@ def main():
     # Rescale sample-count params from model's FS_EFF to actual FS_EFF
     REFRACTORY = max(1, round(REFRACTORY_M * FS_EFF / MODEL_FS_EFF))
     SMOOTH_WIN = max(1, round(SMOOTH_WIN_M * FS_EFF / MODEL_FS_EFF))
-    HOP        = args.hop if args.hop > 0 else T_OPT
+    HOP        = args.hop if args.hop > 0 else 1
 
     if not USE_FILTER:
         print("  [info] bandpass filter disabled — applying CAR only")
@@ -225,18 +225,19 @@ def main():
 
     # ── Shared state ───────────────────────────────────────────────────────────
     rz        = RunningZScore(30 * FS_EFF, N_CH)
-    win_buf:   list = []
+    win_buf   = deque(maxlen=T_OPT)
     score_buf = deque([0.0] * SMOOTH_WIN, maxlen=SMOOTH_WIN)
     gate_buf  = deque([0.0] * PERSIST_K,  maxlen=PERSIST_K)
     n_raw     = 0
     n_dec     = 0
+    n_since_pred = 0
     last_det  = -REFRACTORY
     last_ts   = 0.0   # LSL timestamp of the most recent raw sample
     last_btn  = 0     # button state from extra stream channel
 
     def infer() -> None:
         nonlocal last_det
-        win_arr = np.array(win_buf[:T_OPT], dtype=np.float64)
+        win_arr = np.array(win_buf, dtype=np.float64)
 
         if not np.isfinite(win_arr).all():
             dbg["n_guard_fired"] += 1
@@ -340,10 +341,11 @@ def main():
                 dbg["n_zscore_nan"] += 1
             win_buf.append(z)
             n_dec += 1
+            n_since_pred += 1
 
-            if len(win_buf) >= T_OPT:
+            if len(win_buf) == T_OPT and n_since_pred >= HOP:
                 infer()
-                win_buf = win_buf[HOP:]
+                n_since_pred = 0
 
     except KeyboardInterrupt:
         if args.debug:
