@@ -35,6 +35,7 @@ def main():
     ap.add_argument("-s", "--subject", type=int, required=True,  help="Subject index")
     ap.add_argument("-t", "--tache",              required=True,  help="Task name (e.g. spt, gng)")
     ap.add_argument("-n", "--trial",  type=int,   required=True,  help="Trial number")
+    ap.add_argument("-ch", "--channels",  type=str,   required=False, default=None, help="Trial number")
     ap.add_argument("--model",  default="notebooks/models/lgb_demo.pkl",
                     help="Path to trained model pkl")
     ap.add_argument("--data",   default="data",
@@ -68,6 +69,15 @@ def main():
     MF_TEMPLATE = m.get("mf_template", None)   # (T_OPT, N_CH) or None
 
     # ── Load trial ─────────────────────────────────────────────────────────────
+
+    if args.channels is None:
+        if args.tache == "way":
+            CHANNELS = "Fp1,Fp2,F7,F3,Fz,F4,F8,FC5,FC1,FC2,FC6,T7,C3,Cz,C4,T8,TP9,CP5,CP1,CP2,CP6,TP10,P7,P3,Pz,P4,P8,PO9,O1,Oz,O2,PO10".split(",")
+        else:
+            CHANNELS = [f"ch{ch}" for ch in range(1, 17)]
+    else:
+        CHANNELS = args.channels.split(",")
+
     data_root = (ROOT / args.data) if not Path(args.data).is_absolute() else Path(args.data)
     data_path = data_root / f"subject{args.subject}"
     df, cols = load_trial(
@@ -86,6 +96,7 @@ def main():
         decimate=DECIM,
         despike_sigma=args.despike,
         skip_seconds=args.skip,
+        channels=CHANNELS
     )
 
     X       = df[cols].values.astype(np.float64)         # (N, C)
