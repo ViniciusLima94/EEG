@@ -38,12 +38,15 @@ Usage
 """
 
 import argparse
+import csv
+import os
 import random
 import sys
 import time
+from datetime import datetime
 
 import pygame
-from pylsl import StreamInlet, StreamInfo, StreamOutlet, resolve_byprop
+from pylsl import StreamInlet, StreamInfo, StreamOutlet, local_clock, resolve_byprop
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -69,6 +72,9 @@ DEFAULTS = dict(
     # hardware button
     button_channel=17,
     button_threshold=0.5,
+    # output
+    out_dir=".",
+    prefix="gng",
 )
 
 # LSL marker codes
@@ -139,6 +145,11 @@ def parse_args():
                    dest="button_threshold")
     p.add_argument("--no-eeg-check", action="store_true",
                    help="Skip PiEEG stream check (keyboard-only test mode)")
+    # output
+    p.add_argument("--out-dir", default=DEFAULTS["out_dir"],
+                   help="Directory for output CSV files")
+    p.add_argument("--prefix", default=DEFAULTS["prefix"],
+                   help="Filename prefix (e.g. subject ID)")
     return p.parse_args()
 
 
@@ -246,6 +257,26 @@ def run_task(args):
     outlet = make_marker_outlet(args.n_trials)
     print("[LSL] GNG_Markers outlet open.\n")
 
+    # ── CSV output ────────────────────────────────────────────────────────
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(args.out_dir, exist_ok=True)
+    marker_path = os.path.join(args.out_dir, f"{args.prefix}_markers_{stamp}.csv")
+    eeg_path    = os.path.join(args.out_dir, f"{args.prefix}_eeg_{stamp}.csv")
+
+    marker_fh     = open(marker_path, "w", newline="")
+    marker_writer = csv.writer(marker_fh)
+    marker_writer.writerow(["lsl_timestamp", "marker_code", "marker_label", "trial_type"])
+    print(f"[CSV] Markers → {marker_path}")
+
+    eeg_fh     = None
+    eeg_writer = None
+    if eeg_inlet is not None:
+        n_eeg_ch = eeg_inlet.info().channel_count()
+        eeg_fh     = open(eeg_path, "w", newline="")
+        eeg_writer = csv.writer(eeg_fh)
+        eeg_writer.writerow(["lsl_timestamp"] + [f"ch{i}" for i in range(n_eeg_ch)])
+        print(f"[CSV] EEG     → {eeg_path}\n")
+
     # ── PyGame ───────────────────────────────────────────────────────────
     pygame.init()
     flags = pygame.FULLSCREEN if args.fullscreen else 0
@@ -299,47 +330,61 @@ def run_task(args):
     # ── Helpers used inside the trial loop ───────────────────────────────
     prev_hw = False
 
+    MARKER_LABELS = {
+        MARKER_S1: "S1_warning", MARKER_GO_ONSET: "go_onset",
+        MARKER_NOGO_ONSET: "nogo_onset", MARKER_MOVEMENT: "button_press",
+        MARKER_HIT: "hit", MARKER_MISS: "miss",
+        MARKER_CR: "correct_rejection", MARKER_FA: "false_alarm",
+        MARKER_END: "end",
+    }
+
+    def write_marker(code: int, trial_type: str = "") -> None:
+        ts = local_clock()
+        outlet.push_sample([code])
+        label = MARKER_LABELS.get(code, f"unknown_{code}")
+        marker_writer.writerow([f"{ts:.6f}", code, label, trial_type])
+
+    def drain_eeg(detect_edge: bool = False) -> bool:
+        """Pull all pending EEG samples, write to CSV, optionally detect button edge."""
+        nonlocal prev_hw
+        if eeg_inlet is None:
+            return False
+        fired = False
+        while True:
+            sample, ts = eeg_inlet.pull_sample(timeout=0.0)
+            if sample is None:
+                break
+            if eeg_writer is not None:
+                eeg_writer.writerow([f"{ts:.6f}"] + [f"{v:.6f}" for v in sample])
+            if use_hw_button:
+                current = sample[args.button_channel] > args.button_threshold
+                if detect_edge and current and not prev_hw:
+                    fired = True
+                prev_hw = current
+        return fired
+
     def pump_events() -> None:
         """Drain the pygame event queue. Quits immediately on QUIT or ESC."""
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
-                outlet.push_sample([MARKER_END])
+                write_marker(MARKER_END)
+                marker_fh.close()
+                if eeg_fh:
+                    eeg_fh.close()
                 pygame.quit(); sys.exit()
             if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
-                outlet.push_sample([MARKER_END])
+                write_marker(MARKER_END)
+                marker_fh.close()
+                if eeg_fh:
+                    eeg_fh.close()
                 pygame.quit(); sys.exit()
 
-    def poll_hw_edge() -> bool:
-        nonlocal prev_hw
-        if not use_hw_button:
-            return False
-        fired = False
-        while True:
-            sample, _ = eeg_inlet.pull_sample(timeout=0.0)
-            if sample is None:
-                break
-            current = sample[args.button_channel] > args.button_threshold
-            if current and not prev_hw:
-                fired = True
-            prev_hw = current
-        return fired
-
-    def drain_hw():
-        nonlocal prev_hw
-        if not use_hw_button:
-            return
-        while True:
-            sample, _ = eeg_inlet.pull_sample(timeout=0.0)
-            if sample is None:
-                break
-            prev_hw = sample[args.button_channel] > args.button_threshold
-
     def wait_period(duration: float, draw_fn=None):
-        """Block for duration seconds, draining events."""
+        """Block for duration seconds, draining events and EEG."""
         end = time.perf_counter() + duration
         while time.perf_counter() < end:
             pump_events()
-            drain_hw()
+            drain_eeg()
             if draw_fn:
                 draw_fn()
             pygame.display.flip()
@@ -357,7 +402,7 @@ def run_task(args):
         # ── ITI: fixation cross ──────────────────────────────────────────
         iti = rng.uniform(args.iti_min, args.iti_max)
         prev_hw = False  # reset edge detector
-        drain_hw()
+        drain_eeg()
 
         def draw_iti():
             screen.fill(BG)
@@ -369,7 +414,7 @@ def run_task(args):
         # ── S1 warning cue (optional) ────────────────────────────────────
         if args.s1:
             # S1 on
-            outlet.push_sample([MARKER_S1])
+            write_marker(MARKER_S1, trial_type)
 
             def draw_s1():
                 screen.fill(BG)
@@ -392,7 +437,7 @@ def run_task(args):
         draw_text(screen, counter_str, font_small, W - 60, 20, DIM_C)
         pygame.display.flip()
 
-        outlet.push_sample([marker_code])    # ← LSL marker, precise timestamp
+        write_marker(marker_code, trial_type)
         stim_onset = time.perf_counter()
 
         # ── Response window: stimulus stays on; wait for movement ─────────
@@ -403,10 +448,10 @@ def run_task(args):
         while time.perf_counter() < deadline:
             pump_events()
 
-            if not pressed and poll_hw_edge():
+            if not pressed and drain_eeg(detect_edge=True):
                 press_rt = time.perf_counter() - stim_onset
                 pressed = True
-                outlet.push_sample([MARKER_MOVEMENT])
+                write_marker(MARKER_MOVEMENT, trial_type)
 
             if pressed:
                 break
@@ -433,7 +478,7 @@ def run_task(args):
             outcome_label = "FALSE ALARM" if pressed else "WITHHELD"
             outcome_color = FA_C if pressed else CR_C
 
-        outlet.push_sample([outcome_code])
+        write_marker(outcome_code, trial_type)
 
         results.append(dict(
             trial=trial_num,
@@ -452,7 +497,13 @@ def run_task(args):
             sleep_precise(args.feedback_duration)
 
     # ── End ───────────────────────────────────────────────────────────────
-    outlet.push_sample([MARKER_END])
+    write_marker(MARKER_END)
+    marker_fh.flush(); marker_fh.close()
+    if eeg_fh:
+        eeg_fh.flush(); eeg_fh.close()
+    print(f"\n[CSV] Saved → {marker_path}")
+    if eeg_fh:
+        print(f"[CSV] Saved → {eeg_path}")
 
     hits   = sum(1 for r in results if r["outcome"] == "MOVE")
     misses = sum(1 for r in results if r["outcome"] == "MISS")
