@@ -234,8 +234,13 @@ def run_task(args):
     if args.button_channel >= 0 and not use_hw_button:
         print("[LSL] WARNING: --button-channel set but no EEG inlet — button responses disabled.")
     if use_hw_button:
+        n_ch = eeg_inlet.info().channel_count()
+        if args.button_channel >= n_ch:
+            print(f"[LSL] ERROR: --button-channel {args.button_channel} is out of range "
+                  f"(stream has {n_ch} channels, indices 0–{n_ch - 1}).")
+            sys.exit(1)
         print(f"[LSL] HW button on channel {args.button_channel} "
-              f"(threshold {args.button_threshold})")
+              f"(threshold {args.button_threshold}, stream has {n_ch} ch)")
 
     # ── Marker outlet ─────────────────────────────────────────────────────
     outlet = make_marker_outlet(args.n_trials)
