@@ -270,11 +270,14 @@ def run_task(args):
 
     eeg_fh     = None
     eeg_writer = None
+    eeg_time_correction = 0.0
     if eeg_inlet is not None:
         n_eeg_ch = eeg_inlet.info().channel_count()
         eeg_fh     = open(eeg_path, "w", newline="")
         eeg_writer = csv.writer(eeg_fh)
         eeg_writer.writerow(["lsl_timestamp"] + [f"ch{i}" for i in range(n_eeg_ch)])
+        eeg_time_correction = eeg_inlet.time_correction(timeout=5.0)
+        print(f"[LSL] EEG time correction: {eeg_time_correction:+.3f} s")
         print(f"[CSV] EEG     → {eeg_path}\n")
 
     # ── PyGame ───────────────────────────────────────────────────────────
@@ -352,10 +355,11 @@ def run_task(args):
         fired = False
         while True:
             sample, ts = eeg_inlet.pull_sample(timeout=0.0)
-            if sample is None:
+            if sample is None or ts is None:
                 break
             if eeg_writer is not None:
-                eeg_writer.writerow([f"{ts:.6f}"] + [f"{v:.6f}" for v in sample])
+                corrected_ts = ts + eeg_time_correction
+                eeg_writer.writerow([f"{corrected_ts:.6f}"] + [f"{v:.6f}" for v in sample])
             if use_hw_button:
                 current = sample[args.button_channel] > args.button_threshold
                 if detect_edge and current and not prev_hw:

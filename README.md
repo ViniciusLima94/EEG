@@ -77,6 +77,33 @@ EEG/
 
 ---
 
+## Go/No-Go Task (`scripts/gng_task.py`)
+
+PyGame + LSL experiment for motor intention data collection.
+
+**Run:**
+```bash
+python scripts/gng_task.py --out-dir data/gng --prefix S01
+```
+
+Outputs two CSVs per session: `<prefix>_markers_<datetime>.csv` and `<prefix>_eeg_<datetime>.csv`.
+
+### LSL Marker Codes
+
+| Code | Label | Meaning |
+|------|-------|---------|
+| 5 | `S1_warning` | S1 warning cue onset |
+| 10 | `go_onset` | Go stimulus (S2) onset |
+| 20 | `nogo_onset` | No-Go stimulus (S2) onset |
+| 30 | `button_press` | Button press detected |
+| 11 | `hit` | Go + pressed in time |
+| 12 | `miss` | Go + no press |
+| 21 | `correct_rejection` | No-Go + no press |
+| 22 | `false_alarm` | No-Go + pressed |
+| 99 | `end` | Experiment end |
+
+---
+
 ## Data Preprocessing
 
 This is the most important thing to understand about the pipeline. Five sequential stages convert raw CSV files into a machine-learning-ready dataset.
