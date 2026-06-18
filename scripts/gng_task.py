@@ -55,6 +55,8 @@ DEFAULTS = dict(
     stream="PiEEG",
     n_trials=80,
     go_ratio=0.75,
+    selfpaced=True,
+    selfpaced_duration=300.0,   # seconds (5 min)
     iti_min=1.5,           # longer ITI suits motor tasks
     iti_max=3.0,
     response_window=2.0,   # time after S2 onset during which movement is accepted
@@ -77,7 +79,7 @@ DEFAULTS = dict(
     prefix="gng",
 )
 
-# LSL marker codes
+# LSL marker codes — cued task
 MARKER_S1 = 5
 MARKER_GO_ONSET = 10
 MARKER_NOGO_ONSET = 20
@@ -87,6 +89,10 @@ MARKER_MISS = 12
 MARKER_CR = 21
 MARKER_FA = 22
 MARKER_END = 99
+# LSL marker codes — self-paced calibration block
+MARKER_SP_START = 40
+MARKER_SP_PRESS = 41
+MARKER_SP_END   = 42
 
 # Colors
 BG = (30, 30, 30)
@@ -145,6 +151,13 @@ def parse_args():
                    dest="button_threshold")
     p.add_argument("--no-eeg-check", action="store_true",
                    help="Skip PiEEG stream check (keyboard-only test mode)")
+    # self-paced calibration block
+    p.add_argument("--selfpaced", action=argparse.BooleanOptionalAction,
+                   default=DEFAULTS["selfpaced"],
+                   help="Run self-paced calibration block before the cued task")
+    p.add_argument("--selfpaced_duration", type=float,
+                   default=DEFAULTS["selfpaced_duration"],
+                   help="Duration of the self-paced block in seconds (default: 300)")
     # output
     p.add_argument("--out-dir", default=DEFAULTS["out_dir"],
                    help="Directory for output CSV files")
@@ -339,6 +352,8 @@ def run_task(args):
         MARKER_HIT: "hit", MARKER_MISS: "miss",
         MARKER_CR: "correct_rejection", MARKER_FA: "false_alarm",
         MARKER_END: "end",
+        MARKER_SP_START: "selfpaced_start", MARKER_SP_PRESS: "selfpaced_press",
+        MARKER_SP_END: "selfpaced_end",
     }
 
     def write_marker(code: int, trial_type: str = "") -> None:
@@ -393,6 +408,84 @@ def run_task(args):
                 draw_fn()
             pygame.display.flip()
             clock.tick(120)
+
+    # ── Self-paced calibration block ──────────────────────────────────────
+    if args.selfpaced:
+        sp_dur = args.selfpaced_duration
+        sp_lines = [
+            "Calibration — Self-Paced Pressing",
+            "",
+            "Press the button naturally, at your own pace.",
+            "Aim for roughly one press every 5–10 seconds.",
+            "No cues, no rush.",
+            "",
+            f"Duration: {sp_dur / 60:.0f} minutes",
+            "",
+            "Press SPACE to begin",
+        ]
+        screen.fill(BG)
+        for i, line in enumerate(sp_lines):
+            f = font_title if i == 0 else font_ui
+            draw_text(screen, line, f, cx, 80 + i * 40, TEXT_C)
+        pygame.display.flip()
+
+        waiting = True
+        while waiting:
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE:
+                        pygame.quit(); sys.exit()
+                    if ev.key == pygame.K_SPACE:
+                        waiting = False
+
+        write_marker(MARKER_SP_START, "selfpaced")
+        sp_end = time.perf_counter() + sp_dur
+        sp_presses = 0
+        prev_hw = False
+
+        while time.perf_counter() < sp_end:
+            pump_events()
+            if drain_eeg(detect_edge=True):
+                write_marker(MARKER_SP_PRESS, "selfpaced")
+                sp_presses += 1
+
+            elapsed   = sp_dur - (sp_end - time.perf_counter())
+            frac_done = elapsed / sp_dur
+
+            screen.fill(BG)
+            draw_fixation(screen, cx, cy)
+            bar_w = int((W - 80) * frac_done)
+            pygame.draw.rect(screen, (60, 60, 60), (40, H - 20, W - 80, 8))
+            pygame.draw.rect(screen, FIX_C,        (40, H - 20, bar_w,  8))
+            draw_text(screen, f"{sp_presses}", font_ui, cx, H - 36, DIM_C)
+            pygame.display.flip()
+            clock.tick(120)
+
+        write_marker(MARKER_SP_END, "selfpaced")
+        print(f"[Selfpaced] Done — {sp_presses} presses in {sp_dur:.0f} s")
+
+        # Brief rest screen before cued task
+        screen.fill(BG)
+        draw_text(screen, "Calibration complete!", font_title, cx, cy - 40, TEXT_C)
+        draw_text(screen, f"{sp_presses} presses recorded.", font_ui, cx, cy + 10, DIM_C)
+        draw_text(screen, "Rest for a moment, then press SPACE for the main task.",
+                  font_ui, cx, cy + 50, TEXT_C)
+        pygame.display.flip()
+
+        waiting = True
+        while waiting:
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if ev.type == pygame.KEYDOWN:
+                    if ev.key == pygame.K_ESCAPE:
+                        pygame.quit(); sys.exit()
+                    if ev.key == pygame.K_SPACE:
+                        waiting = False
+            drain_eeg()
+            clock.tick(30)
 
     # ── Trial loop ────────────────────────────────────────────────────────
     trials = generate_trials(args.n_trials, args.go_ratio, args.seed)
