@@ -55,7 +55,7 @@ DEFAULTS = dict(
     stream="PiEEG",
     n_trials=80,
     go_ratio=0.75,
-    selfpaced=True,
+    selfpaced=False,
     selfpaced_duration=300.0,   # seconds (5 min)
     iti_min=1.5,           # longer ITI suits motor tasks
     iti_max=3.0,
@@ -357,7 +357,7 @@ def run_task(args):
     }
 
     def write_marker(code: int, trial_type: str = "") -> None:
-        ts = local_clock()
+        ts = local_clock() + eeg_time_correction
         outlet.push_sample([code])
         label = MARKER_LABELS.get(code, f"unknown_{code}")
         marker_writer.writerow([f"{ts:.6f}", code, label, trial_type])
