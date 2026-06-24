@@ -18,6 +18,7 @@ data/
 logs/
 predict_log*.csv
 *.gif
+!notebooks/report/live_demo_example.gif
 *.pdf
 
 # ── Claude Code ───────────────────────────────────────────────────────────────
